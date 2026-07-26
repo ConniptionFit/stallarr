@@ -45,6 +45,7 @@
     <button class="tab active" data-tab="dashboard">Dashboard</button>
     <button class="tab" data-tab="torrents">Torrents</button>
     <button class="tab" data-tab="history">History</button>
+    <button class="tab" data-tab="deletions">Deleted</button>
     <button class="tab" data-tab="trackers">Trackers</button>
     <button class="tab" data-tab="settings">Settings</button>
     <button class="tab" data-tab="logs">Logs</button>
@@ -54,6 +55,46 @@
     <!-- Dashboard -->
     <section class="panel active" id="tab-dashboard">
       <div class="stat-grid" id="stat-grid"></div>
+      <div class="glass card danger-card" id="breaker-card" hidden>
+        <div class="card-head">
+          <h2>Deletion held back</h2>
+          <span class="muted">Too much of these trackers came back unregistered to be believed.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Tracker</th><th>Unregistered</th><th>Share</th><th>Limit</th><th>Why</th></tr></thead>
+            <tbody id="breaker-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="glass card" id="condemned-card" hidden>
+        <div class="card-head">
+          <h2>Queued for deletion</h2>
+          <span class="muted" id="condemned-meta"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Torrent</th><th>Tracker</th><th>Size</th><th>Condemned</th><th>Status</th><th></th></tr>
+            </thead>
+            <tbody id="condemned-body"></tbody>
+          </table>
+        </div>
+        <p class="muted note">
+          “Keep” spares a torrent permanently — it is added to the ignore list, so no
+          later scan will re-condemn it.
+        </p>
+      </div>
+
+      <div class="glass card" id="trend-card" hidden>
+        <div class="card-head">
+          <h2>Trend</h2>
+          <span class="muted" id="trend-meta"></span>
+        </div>
+        <div id="trend-charts" class="trend-grid"></div>
+      </div>
+
       <div class="glass card" id="seeding-metrics-card" hidden>
         <div class="card-head">
           <h2>Seeding obligations</h2>
@@ -105,18 +146,71 @@
       <div class="glass card">
         <div class="card-head">
           <h2>All torrents</h2>
+          <span class="muted" id="torrents-count"></span>
+        </div>
+
+        <div class="filters torrent-filters">
+          <input type="search" id="torrent-search" placeholder="Search name…" autocomplete="off">
+          <select id="torrent-tracker"><option value="">all trackers</option></select>
+          <select id="torrent-ailment"><option value="">all problems</option></select>
+          <select id="torrent-sort">
+            <option value="severity">worst first</option>
+            <option value="name">name</option>
+            <option value="size">largest</option>
+            <option value="ratio">lowest ratio</option>
+            <option value="progress">least complete</option>
+          </select>
           <label class="inline muted">
             <input type="checkbox" id="only-issues"> only problems
           </label>
         </div>
+
+        <div class="bulk-bar hidden" id="bulk-bar">
+          <span id="bulk-count"></span>
+          <button class="tiny" data-bulk="repair">Repair</button>
+          <button class="tiny" data-bulk="reset">Reset ladder</button>
+          <button class="tiny" data-bulk="ignore">Ignore</button>
+          <button class="tiny ghost" id="bulk-clear">Clear</button>
+        </div>
+
         <div class="table-wrap">
           <table id="torrents-table">
             <thead>
-              <tr><th>Sev</th><th>Name</th><th>State</th><th>Progress</th><th>Ratio</th><th>Tracker</th><th>Notes</th><th>Actions</th></tr>
+              <tr>
+                <th class="tight"><input type="checkbox" id="select-page" title="Select all shown"></th>
+                <th>Sev</th><th>Name</th><th>State</th><th>Progress</th>
+                <th>Ratio</th><th>Tracker</th><th>Notes</th><th>Actions</th>
+              </tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
+        <div class="card-foot pager" id="torrents-pager" hidden>
+          <button class="tiny ghost" id="page-prev">Previous</button>
+          <span class="muted" id="page-label"></span>
+          <button class="tiny ghost" id="page-next">Next</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Deletion record -->
+    <section class="panel" id="tab-deletions">
+      <div class="glass card">
+        <div class="card-head">
+          <h2>Deleted torrents</h2>
+          <span class="muted" id="deletions-meta"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="deletions-table">
+            <thead>
+              <tr><th>When</th><th>Torrent</th><th>Tracker</th><th>Size</th><th>Data</th><th>Why</th><th>Kept file</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="muted note">
+          This record is permanent — it is not trimmed by the history retention setting.
+        </p>
       </div>
     </section>
 
@@ -225,6 +319,16 @@
       </div>
     </section>
   </main>
+
+  <div id="drawer" class="drawer hidden">
+    <div class="drawer-panel glass">
+      <div class="card-head">
+        <h2 id="drawer-title">Torrent</h2>
+        <button class="tiny ghost" id="drawer-close">Close</button>
+      </div>
+      <div id="drawer-body"></div>
+    </div>
+  </div>
 
   <div id="toast" class="toast hidden"></div>
 </div>

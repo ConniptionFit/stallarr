@@ -220,8 +220,71 @@ td.actions { white-space: nowrap; }
 .toast.good { border-color: rgba(63,185,80,.5); }
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
+/* --- deletion safety surfaces ------------------------------------------ */
+/* The breaker card is a refusal, not a failure: amber rather than red, so it
+   does not read as "something broke" when it means "something was prevented". */
+.danger-card { border-color: rgba(232,191,77,.45); }
+.danger-card h2::before { content: "⚠ "; }
+
+.warn-line { margin-top: 6px; font-size: 12px; color: #e8bf4d; }
+
+/* --- trends ------------------------------------------------------------- */
+.trend-grid {
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+}
+.trend { background: rgba(0,0,0,.2); border-radius: 11px; padding: 12px 14px; }
+.trend-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.trend-head .label { font-size: 12px; color: #9fb3c8; }
+.trend-head .value { font-size: 20px; font-weight: 600; margin-left: auto; }
+.trend-head .sub { font-size: 11px; width: 100%; }
+.spark {
+  width: 100%; height: 40px; margin-top: 8px; overflow: visible;
+}
+.spark polyline {
+  fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linejoin: round; stroke-linecap: round; opacity: .85;
+  vector-effect: non-scaling-stroke;
+}
+
+/* --- torrent filters, bulk actions, paging ------------------------------ */
+.torrent-filters { flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.torrent-filters input[type="search"] { min-width: 220px; flex: 1 1 220px; }
+
+.bulk-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 12px; padding: 10px 12px; border-radius: 10px;
+  background: rgba(88,166,255,.12); border: 1px solid rgba(88,166,255,.32);
+}
+.bulk-bar span { font-size: 13px; margin-right: 4px; }
+
+.pager { display: flex; align-items: center; gap: 12px; }
+th.tight, td.tight { width: 1%; white-space: nowrap; }
+td.name a { color: inherit; text-decoration: none; border-bottom: 1px dotted rgba(255,255,255,.28); }
+td.name a:hover { border-bottom-color: currentColor; }
+
+/* --- detail drawer ------------------------------------------------------ */
+.drawer {
+  position: fixed; inset: 0; z-index: 40; display: flex; justify-content: flex-end;
+  background: rgba(0,0,0,.45); backdrop-filter: blur(2px);
+}
+.drawer.hidden { display: none; }
+.drawer-panel {
+  width: min(560px, 100%); height: 100%; overflow-y: auto; border-radius: 0;
+  padding: 20px; animation: slide .16s ease-out;
+}
+.drawer-panel h3 { margin: 18px 0 8px; font-size: 13px; color: #9fb3c8; }
+.detail { display: grid; grid-template-columns: 130px 1fr; gap: 6px 12px; margin: 0; }
+.detail dt { color: #9fb3c8; font-size: 12px; }
+.detail dd { margin: 0; font-size: 13px; word-break: break-all; }
+.finding { margin-bottom: 8px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+@keyframes slide { from { transform: translateX(18px); opacity: 0; } to { transform: none; opacity: 1; } }
+
 @media (max-width: 640px) {
   .topbar { flex-direction: column; align-items: flex-start; }
   main { padding: 14px 12px 40px; }
   .topbar, .tabs { margin-inline: 12px; padding-inline: 14px; }
+  .drawer-panel { width: 100%; }
+  .detail { grid-template-columns: 1fr; }
+  .detail dt { margin-top: 6px; }
 }

@@ -96,7 +96,32 @@ everything it has. So four things must agree before anything is deleted:
 Only the torrent's *main* problem counts. One dead tracker on a torrent that
 also announces elsewhere isn't grounds to erase it.
 
-Every deletion is written to History (filter for `delete`) and alerted on.
+None of those help against a tracker that's simply wrong for a day, so before
+each deletion the `.torrent` file is written to **Keep them in** (default
+`graveyard/` inside the data directory) with a small `.json` beside it naming
+what it was. The data is still gone, but re-adding is a file away rather than a
+re-download from a site that may not have it any more. If that export fails, the
+deletion is **cancelled** rather than done without a record — a permanent
+failure here shows up as "nothing is being deleted", which is the safe direction
+to fail in. Turn it off with **Keep the .torrent file before deleting**.
+
+### Seeing what's about to happen
+
+The dashboard shows **Queued for deletion**: every torrent holding an
+`unregistered` verdict, how long it's held it, and why it hasn't gone yet
+(waiting out the soak, held by the circuit breaker, or eligible next scan).
+**Keep** spares one permanently — it adds the torrent to the ignore list, so no
+later scan can re-condemn it. Reprieving alone would only reset the clock and
+delete it a day later, which isn't what anyone means by "keep".
+
+When a circuit breaker trips, **Deletion held back** appears with the evidence:
+how many of that tracker's torrents came back unregistered, out of how many, and
+against what limit. A guard that only writes to the log looks exactly like having
+nothing to delete.
+
+The **Deleted** tab is the permanent record — what went, when, how big it was,
+whether the data went with it, the tracker's own reason, and which kept file
+corresponds. Unlike History, it is never trimmed by the retention setting.
 
 The steps themselves: **resume**, **reannounce**, **refresh announce** (rewrite
 a stale passkey, keeping the announce domain the torrent already uses),
@@ -376,5 +401,28 @@ GET  /api/torrents?only_issues=true    every torrent with its diagnosis
 POST /api/scan                         scan now
 POST /api/torrents/{hash}/repair       force one repair step
 POST /api/torrents/{hash}/reset        clear the recovery ladder
+GET  /api/condemned                    what is queued for deletion, and why
+POST /api/condemned/{hash}/keep        spare one permanently
+GET  /api/deletions                    the permanent record of what went
+GET  /api/snapshots?days=7             per-scan history behind the trend charts
 GET  /health                           container healthcheck
+GET  /metrics                          Prometheus, when web.metrics_enabled
+```
+
+### Metrics
+
+Off by default. `web.metrics_enabled` serves Prometheus gauges at `/metrics`
+with **no authentication** — Prometheus has no session to present. It exports
+counts only: no torrent names, no infohashes, nothing from config. It is opt-in
+because the labels name the private trackers this host is on, which is more than
+an open endpoint should volunteer.
+
+```
+stallarr_torrents_total / _healthy / _sick / _skipped
+stallarr_actions_total, stallarr_scan_duration_seconds
+stallarr_client_up, stallarr_tracker_up{tracker=…}
+stallarr_seeding_outstanding, stallarr_seeding_averted
+stallarr_condemned_total, stallarr_deletions_total, stallarr_deleted_bytes_total
+stallarr_deletion_blocked{tracker=…}     present only while a breaker is tripped
+stallarr_disk_free_bytes
 ```

@@ -12,6 +12,12 @@ const state = {
   // dropdown must not throw away what you typed into the previous one.
   trackerDraft: {},
   selectedTracker: null,
+  // Torrents are cached so filtering and paging are local: the ten-second
+  // refresh replaces the data, not the view you are working in.
+  torrents: [],
+  issues: [],
+  selected: new Set(),
+  page: 0,
 };
 
 // --- helpers ----------------------------------------------------------------
@@ -135,14 +141,19 @@ $$('.tab').forEach((tab) => tab.addEventListener('click', () => {
 async function refresh() {
   try {
     const status = await api('/status');
+    state.issues = status.issues || [];
     renderStats(status);
-    renderIssues(status.issues || []);
+    renderIssues(state.issues);
     $('#dry-run-pill').hidden = !status.recovery.dry_run;
     renderSeedingMetrics(status.seeding || {});
     renderSeedingUnmatched(status.seeding_unmatched || []);
+    renderBreakers(status.deletion_blocks || []);
+    renderCondemned(status.condemned || []);
 
+    if (state.activeTab === 'dashboard') await loadTrend();
     if (state.activeTab === 'torrents') await loadTorrents();
     if (state.activeTab === 'history') await loadHistory();
+    if (state.activeTab === 'deletions') await loadDeletions();
     if (state.activeTab === 'logs') await loadLogs();
     if (state.activeTab === 'trackers') { renderPlugins(status); await loadTrackerStats(); }
   } catch (err) {
@@ -179,6 +190,111 @@ function renderSeedingMetrics(metrics) {
       + recent.slice(0, 4).map((r) =>
         `<strong>${esc(r.name)}</strong> (${esc(label(r.last_action))}, ${ago(r.cleared_at)})`).join(' · ')
     : 'Averted = the tracker stopped asking after stallarr repaired it. Nothing has qualified yet.';
+}
+
+/** Trackers whose deletions are currently refused, and the evidence.
+ *
+ *  A circuit breaker that only writes to the log is indistinguishable from
+ *  having nothing to delete, so it gets a card of its own rather than a line in
+ *  a status pill.
+ */
+function renderBreakers(blocks) {
+  $('#breaker-card').hidden = !blocks.length;
+  if (!blocks.length) return;
+
+  $('#breaker-body').innerHTML = blocks.map((b) => `
+    <tr>
+      <td><span class="pill">${esc(b.tracker)}</span></td>
+      <td>${b.condemned}${b.total ? ` of ${b.total}` : ''}</td>
+      <td><strong>${b.fraction === null ? '—' : `${(b.fraction * 100).toFixed(0)}%`}</strong></td>
+      <td class="muted">${(b.limit * 100).toFixed(0)}%</td>
+      <td class="muted">${esc(b.reason)}</td>
+    </tr>`).join('');
+}
+
+/** What is queued for deletion, and why it has not happened yet. */
+function renderCondemned(rows) {
+  $('#condemned-card').hidden = !rows.length;
+  if (!rows.length) return;
+
+  const bytesAtRisk = rows.reduce((sum, r) => sum + (r.size || 0), 0);
+  $('#condemned-meta').textContent =
+    `${rows.length} torrent(s) · ${bytes(bytesAtRisk)}`;
+
+  $('#condemned-body').innerHTML = rows.map((r) => `
+    <tr>
+      <td class="name">${esc(r.name)}</td>
+      <td><span class="pill">${esc(r.tracker_name || r.tracker)}</span></td>
+      <td>${bytes(r.size)}</td>
+      <td class="muted">${ago(r.first_at)}</td>
+      <td class="muted">${esc(r.status)}</td>
+      <td class="actions">
+        <button class="tiny" data-keep="${esc(r.infohash)}" data-name="${esc(r.name)}">Keep</button>
+      </td>
+    </tr>`).join('');
+
+  $$('[data-keep]', $('#condemned-body')).forEach((btn) => btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const res = await api(`/condemned/${btn.dataset.keep}/keep`, {
+        method: 'POST',
+        body: JSON.stringify({ name: btn.dataset.name }),
+      });
+      toast(res.detail, 'good');
+    } catch (err) { toast(err.message, 'bad'); }
+    refresh();
+  }));
+}
+
+/** Small inline sparklines. No chart library: these are polylines over a fixed
+ *  viewBox, and pulling in a dependency for that would be the tail wagging. */
+async function loadTrend() {
+  let snapshots = [];
+  try { ({ snapshots } = await api('/snapshots?days=7')); } catch { return; }
+
+  $('#trend-card').hidden = snapshots.length < 2;
+  if (snapshots.length < 2) return;
+
+  $('#trend-meta').textContent =
+    `${snapshots.length} scans · ${ago(snapshots[0].ts)} to now`;
+
+  const series = [
+    { key: 'sick', label: 'Problems', cls: 'warn' },
+    { key: 'condemned', label: 'Queued for deletion', cls: 'crit' },
+    { key: 'owed', label: 'Seeding owed', cls: '' },
+    { key: 'total', label: 'Library size', cls: 'ok' },
+  ];
+
+  $('#trend-charts').innerHTML = series.map((s) => {
+    const values = snapshots.map((row) => row[s.key] || 0);
+    const last = values[values.length - 1];
+    const first = values[0];
+    const delta = last - first;
+    const arrow = delta === 0 ? '±0' : (delta > 0 ? `+${delta}` : `${delta}`);
+    return `
+      <div class="trend">
+        <div class="trend-head">
+          <span class="label">${esc(s.label)}</span>
+          <span class="value ${s.cls}">${last}</span>
+          <span class="muted sub">${arrow} over 7d</span>
+        </div>
+        ${sparkline(values)}
+      </div>`;
+  }).join('');
+}
+
+function sparkline(values) {
+  const width = 240;
+  const height = 40;
+  const max = Math.max(...values, 1);
+  const min = Math.min(...values, 0);
+  const span = max - min || 1;
+  const step = values.length > 1 ? width / (values.length - 1) : width;
+  const points = values
+    .map((v, i) => `${(i * step).toFixed(1)},${(height - ((v - min) / span) * height).toFixed(1)}`)
+    .join(' ');
+  return `<svg class="spark" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"
+    role="img" aria-hidden="true"><polyline points="${points}"/></svg>`;
 }
 
 /** Seeding the tracker wants that no local torrent satisfies. */
@@ -218,6 +334,24 @@ function renderStats(status) {
       value: seeding.averted ?? 0,
       cls: seeding.averted ? 'ok' : '',
       sub: `cleared after a repair · last ${seeding.window_days ?? 7}d`,
+    },
+    {
+      label: 'Free space',
+      value: status.disk && status.disk.free != null ? bytes(status.disk.free) : '—',
+      sub: 'where the client writes',
+    },
+    {
+      label: 'Reclaimed',
+      value: bytes((status.deletions || {}).reclaimed || 0),
+      sub: `${(status.deletions || {}).count || 0} deleted · all time`,
+    },
+    {
+      label: 'Queued for deletion',
+      value: (status.condemned || []).length,
+      cls: (status.condemned || []).length ? 'warn' : 'ok',
+      sub: (status.deletion_blocks || []).length
+        ? `${(status.deletion_blocks || []).length} tracker(s) held back`
+        : 'awaiting the soak period',
     },
     {
       label: 'Client',
@@ -264,7 +398,7 @@ function rowForIssue(item) {
   return `
     <tr>
       <td><span class="dot ${SEV[item.severity] || 'info'}" title="${esc(item.severity_name)}"></span></td>
-      <td class="name">${esc(item.name)}</td>
+      <td class="name"><a href="#" data-detail="${esc(item.infohash)}">${esc(item.name)}</a></td>
       <td>${findings}</td>
       <td>${item.tracker ? `<span class="pill">${esc(item.tracker)}</span>` : '<span class="muted">unmatched</span>'}</td>
       <td class="actions">
@@ -309,34 +443,257 @@ $('#scan-now').addEventListener('click', async () => {
 
 $('#only-issues').addEventListener('change', loadTorrents);
 
+const PAGE_SIZE = 100;
+
+const SORTS = {
+  severity: (a, b) => b.severity - a.severity || a.name.localeCompare(b.name),
+  name: (a, b) => a.name.localeCompare(b.name),
+  size: (a, b) => b.size - a.size,
+  ratio: (a, b) => a.ratio - b.ratio,
+  progress: (a, b) => a.progress - b.progress,
+};
+
+/** Fetch, then render from the cache. Split so that the ten-second refresh can
+ *  update the data without a filter change costing a round trip. */
 async function loadTorrents() {
   const onlyIssues = $('#only-issues').checked;
   const { torrents } = await api(`/torrents?only_issues=${onlyIssues}`);
+  state.torrents = torrents;
+  refreshTorrentFilterOptions(torrents);
+  renderTorrents();
+}
+
+/** Populate the tracker and problem dropdowns from what is actually present.
+ *  Rebuilt only when the set of values changes, because replacing a <select>'s
+ *  options while it is open closes it. */
+function refreshTorrentFilterOptions(torrents) {
+  const trackers = [...new Set(torrents.map((t) => t.tracker || t.tracker_hosts[0] || ''))]
+    .filter(Boolean).sort();
+  const ailments = [...new Set(torrents.flatMap((t) => t.findings.map((f) => f.ailment)))].sort();
+
+  syncOptions($('#torrent-tracker'), trackers, 'all trackers');
+  syncOptions($('#torrent-ailment'), ailments, 'all problems');
+}
+
+function syncOptions(select, values, allLabel) {
+  const wanted = JSON.stringify(values);
+  if (select.dataset.values === wanted) return;
+  const current = select.value;
+  select.dataset.values = wanted;
+  select.innerHTML = `<option value="">${esc(allLabel)}</option>`
+    + values.map((v) => `<option value="${esc(v)}">${esc(label(v))}</option>`).join('');
+  // Keep the user's choice if it still exists; otherwise fall back to "all"
+  // rather than silently filtering by something no longer on screen.
+  select.value = values.includes(current) ? current : '';
+}
+
+function visibleTorrents() {
+  const needle = $('#torrent-search').value.trim().toLowerCase();
+  const tracker = $('#torrent-tracker').value;
+  const ailment = $('#torrent-ailment').value;
+
+  return (state.torrents || []).filter((t) => {
+    if (needle && !t.name.toLowerCase().includes(needle)) return false;
+    if (tracker && (t.tracker || t.tracker_hosts[0] || '') !== tracker) return false;
+    if (ailment && !t.findings.some((f) => f.ailment === ailment)) return false;
+    return true;
+  }).sort(SORTS[$('#torrent-sort').value] || SORTS.severity);
+}
+
+function renderTorrents() {
+  const rows = visibleTorrents();
+  const pages = Math.max(Math.ceil(rows.length / PAGE_SIZE), 1);
+  // A filter that shrinks the list can strand you past the end.
+  state.page = Math.min(state.page, pages - 1);
+  const page = rows.slice(state.page * PAGE_SIZE, (state.page + 1) * PAGE_SIZE);
   const body = $('#torrents-table tbody');
 
-  if (!torrents.length) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">No torrents to show.</td></tr>';
+  $('#torrents-count').textContent = rows.length === (state.torrents || []).length
+    ? `${rows.length} torrent(s)`
+    : `${rows.length} of ${(state.torrents || []).length} torrent(s)`;
+
+  $('#torrents-pager').hidden = pages < 2;
+  $('#page-label').textContent = `page ${state.page + 1} of ${pages}`;
+  $('#page-prev').disabled = state.page === 0;
+  $('#page-next').disabled = state.page >= pages - 1;
+
+  if (!page.length) {
+    body.innerHTML = '<tr><td colspan="9" class="empty">No torrents match.</td></tr>';
+    renderBulkBar();
     return;
   }
 
-  body.innerHTML = torrents.map((t) => {
-    const notes = t.skipped
-      ? `<span class="muted">skipped: ${esc(t.skipped)}</span>`
-      : t.findings.map((f) => `<span class="pill">${esc(label(f.ailment))}</span>`).join(' ') || '<span class="pill ok">healthy</span>';
-    return `
-      <tr>
-        <td><span class="dot ${SEV[t.severity] || 'ok'}"></span></td>
-        <td class="name">${esc(t.name)}<div class="muted">${bytes(t.size)}</div></td>
-        <td><span class="pill">${esc(t.raw_state)}</span></td>
-        <td><div class="bar"><i style="width:${(t.progress * 100).toFixed(1)}%"></i></div>
-            <span class="muted">${(t.progress * 100).toFixed(1)}%</span></td>
-        <td>${t.ratio.toFixed(2)}</td>
-        <td>${t.tracker ? esc(t.tracker) : `<span class="muted">${esc(t.tracker_hosts[0] || '—')}</span>`}</td>
-        <td>${notes}</td>
-        <td class="actions"><button class="tiny" data-repair="${esc(t.infohash)}">Repair</button></td>
-      </tr>`;
-  }).join('');
+  body.innerHTML = page.map(torrentRow).join('');
   wireRowActions(body);
+  wireSelection(body);
+  renderBulkBar();
+}
+
+function torrentRow(t) {
+  const notes = t.skipped
+    ? `<span class="muted">skipped: ${esc(t.skipped)}</span>`
+    : t.findings.map((f) => `<span class="pill">${esc(label(f.ailment))}</span>`).join(' ')
+      || '<span class="pill ok">healthy</span>';
+  const checked = state.selected.has(t.infohash) ? ' checked' : '';
+  return `
+    <tr>
+      <td class="tight"><input type="checkbox" data-select="${esc(t.infohash)}"${checked}></td>
+      <td><span class="dot ${SEV[t.severity] || 'ok'}"></span></td>
+      <td class="name"><a href="#" data-detail="${esc(t.infohash)}">${esc(t.name)}</a>
+          <div class="muted">${bytes(t.size)}</div></td>
+      <td><span class="pill">${esc(t.raw_state)}</span></td>
+      <td><div class="bar"><i style="width:${(t.progress * 100).toFixed(1)}%"></i></div>
+          <span class="muted">${(t.progress * 100).toFixed(1)}%</span></td>
+      <td>${t.ratio.toFixed(2)}</td>
+      <td>${t.tracker ? esc(t.tracker) : `<span class="muted">${esc(t.tracker_hosts[0] || '—')}</span>`}</td>
+      <td>${notes}</td>
+      <td class="actions"><button class="tiny" data-repair="${esc(t.infohash)}">Repair</button></td>
+    </tr>`;
+}
+
+// --- selection and bulk actions ---------------------------------------------
+
+function wireSelection(root) {
+  $$('[data-select]', root).forEach((box) => box.addEventListener('change', () => {
+    if (box.checked) state.selected.add(box.dataset.select);
+    else state.selected.delete(box.dataset.select);
+    renderBulkBar();
+  }));
+}
+
+function renderBulkBar() {
+  const count = state.selected.size;
+  $('#bulk-bar').classList.toggle('hidden', !count);
+  $('#bulk-count').textContent = `${count} selected`;
+  // Reflects only what is on screen, so it cannot claim "all" while filtered.
+  const shown = $$('[data-select]').map((b) => b.dataset.select);
+  $('#select-page').checked = shown.length > 0 && shown.every((h) => state.selected.has(h));
+}
+
+$('#select-page').addEventListener('change', (event) => {
+  $$('[data-select]').forEach((box) => {
+    box.checked = event.target.checked;
+    if (box.checked) state.selected.add(box.dataset.select);
+    else state.selected.delete(box.dataset.select);
+  });
+  renderBulkBar();
+});
+
+$('#bulk-clear').addEventListener('click', () => {
+  state.selected.clear();
+  renderTorrents();
+});
+
+$$('[data-bulk]').forEach((btn) => btn.addEventListener('click', async () => {
+  const kind = btn.dataset.bulk;
+  const hashes = [...state.selected];
+  if (!hashes.length) return;
+  if (!confirm(`${label(kind)} ${hashes.length} torrent(s)?`)) return;
+
+  btn.disabled = true;
+  let ok = 0;
+  let failed = 0;
+  // Sequential on purpose: these each hit qBittorrent, and firing a hundred
+  // at once is how you get rate-limited by your own client.
+  for (const infohash of hashes) {
+    try {
+      if (kind === 'repair') await api(`/torrents/${infohash}/repair`, { method: 'POST' });
+      if (kind === 'reset') await api(`/torrents/${infohash}/reset`, { method: 'POST' });
+      if (kind === 'ignore') {
+        await api(`/torrents/${infohash}/ignore`, { method: 'POST', body: JSON.stringify({}) });
+      }
+      ok += 1;
+    } catch { failed += 1; }
+  }
+  btn.disabled = false;
+  state.selected.clear();
+  toast(`${label(kind)}: ${ok} done${failed ? `, ${failed} failed` : ''}`, failed ? 'bad' : 'good');
+  await loadTorrents();
+}));
+
+['#torrent-search', '#torrent-tracker', '#torrent-ailment', '#torrent-sort'].forEach((sel) => {
+  $(sel).addEventListener('input', () => { state.page = 0; renderTorrents(); });
+});
+$('#page-prev').addEventListener('click', () => { state.page -= 1; renderTorrents(); });
+$('#page-next').addEventListener('click', () => { state.page += 1; renderTorrents(); });
+
+// --- detail drawer ------------------------------------------------------------
+
+function openDrawer(infohash) {
+  const t = (state.torrents || []).find((x) => x.infohash === infohash)
+    || (state.issues || []).find((x) => x.infohash === infohash);
+  if (!t) return;
+
+  $('#drawer-title').textContent = t.name;
+  const rows = [
+    ['Infohash', t.infohash],
+    ['State', `${t.raw_state}${t.skipped ? ` (skipped: ${t.skipped})` : ''}`],
+    ['Size', bytes(t.size)],
+    ['Progress', `${((t.progress || 0) * 100).toFixed(1)}%`],
+    ['Ratio', (t.ratio ?? 0).toFixed(2)],
+    ['Tracker', t.tracker || (t.tracker_hosts || []).join(', ') || 'unmatched'],
+    ['Announce hosts', (t.tracker_hosts || []).join(', ') || '—'],
+    ['Category', t.category || '—'],
+    ['Tags', (t.tags || []).join(', ') || '—'],
+  ];
+
+  const findings = (t.findings || []).map((f) => `
+    <div class="finding">
+      <span class="pill">${esc(label(f.ailment))}</span>
+      <span class="muted">${esc(f.detail)}</span>
+    </div>`).join('') || '<p class="muted">Nothing wrong with this one.</p>';
+
+  $('#drawer-body').innerHTML = `
+    <dl class="detail">${rows.map(([k, v]) =>
+      `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+    <h3>Findings</h3>${findings}
+    <div class="card-foot">
+      <button class="tiny" data-repair="${esc(t.infohash)}">Repair</button>
+      <button class="tiny" data-reset="${esc(t.infohash)}">Reset ladder</button>
+      <button class="tiny" data-ignore="${esc(t.infohash)}">Ignore</button>
+    </div>`;
+  wireRowActions($('#drawer-body'));
+  $('#drawer').classList.remove('hidden');
+}
+
+const closeDrawer = () => $('#drawer').classList.add('hidden');
+$('#drawer-close').addEventListener('click', closeDrawer);
+$('#drawer').addEventListener('click', (e) => { if (e.target.id === 'drawer') closeDrawer(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+
+document.addEventListener('click', (event) => {
+  const link = event.target.closest('[data-detail]');
+  if (!link) return;
+  event.preventDefault();
+  openDrawer(link.dataset.detail);
+});
+
+// --- deletions ----------------------------------------------------------------
+
+async function loadDeletions() {
+  const { deletions, totals } = await api('/deletions');
+  $('#deletions-meta').textContent = totals.count
+    ? `${totals.count} deleted · ${bytes(totals.reclaimed)} reclaimed`
+    : '';
+  const body = $('#deletions-table tbody');
+  if (!deletions.length) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">Nothing has been deleted.</td></tr>';
+    return;
+  }
+  body.innerHTML = deletions.map((d) => `
+    <tr>
+      <td class="muted">${ago(d.deleted_at)}</td>
+      <td class="name">${esc(d.name)}</td>
+      <td><span class="pill">${esc(d.tracker)}</span></td>
+      <td>${bytes(d.size)}</td>
+      <td>${d.files_deleted
+        ? '<span class="pill warn">erased</span>'
+        : '<span class="pill">entry only</span>'}</td>
+      <td class="muted">${esc(d.reason)}</td>
+      <td class="muted">${d.export_path
+        ? `<code>${esc(d.export_path.split('/').pop())}</code>`
+        : '—'}</td>
+    </tr>`).join('');
 }
 
 // --- history ----------------------------------------------------------------
@@ -403,6 +760,10 @@ const TRACKER_FIELDS = [
   { name: 'cookie', label: 'Raw cookie header', secret: true, placeholder: 'uid=…; pass=…',
     hint: 'Optional. Paste a whole Cookie header here instead — it overrides the two fields above.' },
   { name: 'extra_hosts', label: 'Extra announce hosts', kind: 'list', always: true },
+  { name: 'min_ratio', label: 'Warn below ratio', kind: 'number', always: true,
+    hint: 'The site’s own requirement, not a global one. 0 disables the check.' },
+  { name: 'max_hit_and_runs', label: 'Warn at hit-and-runs', kind: 'number', always: true,
+    hint: 'Most sites tolerate a couple, so the useful alarm is "approaching", not "any". 0 disables.' },
 ];
 
 /** Fields to render for one plugin, per its declared credential_fields. */
@@ -588,7 +949,10 @@ async function loadTrackerStats() {
     // Seeding locally but not counted by the tracker: those announces are not
     // landing, so the torrents earn nothing. Worth surfacing loudly.
     const unseen = s.unseen_seeds;
-    const cls = unseen ? 'warn' : s.hit_and_runs ? 'crit' : 'ok';
+    const warnings = s.warnings || [];
+    // An account heading for trouble outranks announces that are not landing:
+    // one is a threshold you set, the other is an inference.
+    const cls = warnings.length ? 'crit' : unseen ? 'warn' : s.hit_and_runs ? 'crit' : 'ok';
     const seeds = s.seeding != null
       ? `${s.seeding} counted / ${s.local_seeding} local`
       : `${s.local_seeding} seeding locally`;
@@ -596,11 +960,13 @@ async function loadTrackerStats() {
     if (s.uploaded != null) parts.push(`↑ ${bytes(s.uploaded)}`);
     if (s.hit_and_runs != null) parts.push(`H&amp;R ${s.hit_and_runs}`);
     if (unseen) parts.push(`<strong>${unseen} not announcing</strong>`);
+    const alarms = warnings.map((w) => `<div class="warn-line">⚠ ${esc(w)}</div>`).join('');
     return `
       <div class="stat ${cls}">
         <div class="value">${s.ratio != null ? s.ratio.toFixed(2) : '—'}</div>
         <div class="label">${esc(s.name || id)}</div>
         <div class="sub">${parts.join(' · ')}</div>
+        ${alarms}
       </div>`;
   }).join('')}</div>`;
 }
@@ -747,6 +1113,11 @@ const SETTINGS_SCHEMA = [
   { path: 'recovery.delete_min_age_hours', label: 'Only after unregistered for (hours)', type: 'number' },
   { path: 'recovery.delete_max_per_scan', label: 'Max deletions per scan', type: 'number' },
   { path: 'recovery.delete_max_tracker_fraction', label: 'Abort if this fraction of a tracker is unregistered', type: 'number' },
+  { path: 'recovery.delete_export_torrents', label: 'Keep the .torrent file before deleting', type: 'checkbox' },
+  { path: 'recovery.delete_export_dir', label: 'Keep them in' },
+
+  { group: 'Metrics' },
+  { path: 'web.metrics_enabled', label: 'Expose Prometheus /metrics (unauthenticated)', type: 'checkbox' },
 
   { group: 'Notifications' },
   { path: 'notify.discord_enabled', label: 'Discord enabled', type: 'checkbox' },
