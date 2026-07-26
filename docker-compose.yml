@@ -1,0 +1,25 @@
+services:
+  stallarr:
+    build: .
+    image: stallarr:latest
+    container_name: stallarr
+    restart: unless-stopped
+    ports:
+      - "8383:8383"
+    volumes:
+      - ./data:/config
+      # Keep the sqlite database off /config. If /config is a network share
+      # (CIFS/NFS), SQLite cannot get the byte-range locks it needs and every
+      # write fails with "database is locked".
+      - stallarr-db:/data
+    environment:
+      TZ: ${TZ:-UTC}
+      # Everything else is configured in the WebUI or /config/config.json.
+      # Env vars below are optional bootstrap overrides.
+      # STALLARR_QBIT_URL: http://qbittorrent:8080
+      # STALLARR_QBIT_USERNAME: admin
+      # STALLARR_QBIT_PASSWORD: adminadmin
+      # STALLARR_WEB_PASSWORD: changeme
+
+volumes:
+  stallarr-db:

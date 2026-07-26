@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>stallarr</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛟</text></svg>">
+</head>
+<body>
+
+<div id="login" class="login-shell hidden">
+  <div class="glass login-card">
+    <h1>stallarr</h1>
+    <p class="error" id="login-error"></p>
+    <a class="primary sso-button hidden" id="sso-button" href="/api/auth/sso/start">
+      <span id="sso-label">Single sign-on</span>
+    </a>
+    <p class="muted or-divider hidden" id="login-or">or</p>
+    <form id="login-form" class="hidden">
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password">
+      <button type="submit" class="primary">Unlock</button>
+    </form>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <header class="topbar glass">
+    <div class="brand">
+      <span class="logo">🛟</span>
+      <div>
+        <h1>stallarr</h1>
+        <span class="muted" id="subtitle">torrent health &amp; auto-recovery</span>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span class="pill" id="dry-run-pill" hidden>DRY RUN</span>
+      <span class="muted" id="whoami" hidden></span>
+      <button id="scan-now" class="primary">Scan now</button>
+      <button id="logout" class="ghost" hidden>Log out</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="dashboard">Dashboard</button>
+    <button class="tab" data-tab="torrents">Torrents</button>
+    <button class="tab" data-tab="history">History</button>
+    <button class="tab" data-tab="trackers">Trackers</button>
+    <button class="tab" data-tab="settings">Settings</button>
+    <button class="tab" data-tab="logs">Logs</button>
+  </nav>
+
+  <main>
+    <!-- Dashboard -->
+    <section class="panel active" id="tab-dashboard">
+      <div class="stat-grid" id="stat-grid"></div>
+      <div class="glass card" id="seeding-metrics-card" hidden>
+        <div class="card-head">
+          <h2>Seeding obligations</h2>
+          <span class="muted" id="seeding-window"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tracker</th><th>Owed now</th><th>Being repaired</th>
+                <th>Seen</th><th>H&amp;R averted</th><th>Cleared on their own</th>
+              </tr>
+            </thead>
+            <tbody id="seeding-metrics-body"></tbody>
+          </table>
+        </div>
+        <p class="muted note" id="seeding-recent"></p>
+      </div>
+      <div class="glass card" id="seeding-unmatched-card" hidden>
+        <div class="card-head">
+          <h2>Seeding owed on torrents you don't have</h2>
+          <span class="muted">Nothing here can be repaired automatically — the data isn't in your client.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Tracker</th><th>Torrent</th><th>Owed</th></tr></thead>
+            <tbody id="seeding-unmatched-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="glass card">
+        <div class="card-head">
+          <h2>Open issues</h2>
+          <span class="muted" id="issues-meta"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="issues-table">
+            <thead>
+              <tr><th>Sev</th><th>Torrent</th><th>Problem</th><th>Tracker</th><th>Actions</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Torrents -->
+    <section class="panel" id="tab-torrents">
+      <div class="glass card">
+        <div class="card-head">
+          <h2>All torrents</h2>
+          <label class="inline muted">
+            <input type="checkbox" id="only-issues"> only problems
+          </label>
+        </div>
+        <div class="table-wrap">
+          <table id="torrents-table">
+            <thead>
+              <tr><th>Sev</th><th>Name</th><th>State</th><th>Progress</th><th>Ratio</th><th>Tracker</th><th>Notes</th><th>Actions</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- History -->
+    <section class="panel" id="tab-history">
+      <div class="glass card">
+        <div class="card-head">
+          <h2>Recovery history</h2>
+          <div class="filters">
+            <select id="history-action"><option value="">all actions</option></select>
+            <select id="history-outcome">
+              <option value="">any result</option>
+              <option value="true">succeeded</option>
+              <option value="false">failed</option>
+            </select>
+            <span class="muted" id="history-count"></span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="history-table">
+            <thead>
+              <tr><th>When</th><th>Torrent</th><th>Problem</th><th>Action</th><th>Result</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Trackers -->
+    <section class="panel" id="tab-trackers">
+      <div class="glass card">
+        <div class="card-head">
+          <h2>Import from Prowlarr</h2>
+          <span class="muted">Pulls API keys and discovers trackers you are on.</span>
+        </div>
+        <div class="settings-grid">
+          <div class="field"><label>Prowlarr URL</label>
+            <input id="prowlarr-url" placeholder="http://prowlarr:9696"></div>
+          <div class="field"><label>Prowlarr API key</label>
+            <input id="prowlarr-key" type="password" placeholder="Settings → General"></div>
+          <div class="field"><label>&nbsp;</label>
+            <label class="inline"><input type="checkbox" id="prowlarr-autosync"> keep credentials in sync automatically</label></div>
+        </div>
+        <p class="muted note">
+          Prowlarr masks cookies and never stores announce passkeys, so
+          cookie-authenticated sites (IPTorrents) and the <code>refresh announce</code>
+          step still need those entered below by hand.
+        </p>
+        <div id="prowlarr-result"></div>
+        <div class="card-foot">
+          <button id="prowlarr-test" class="ghost">Test connection</button>
+          <button id="prowlarr-preview" class="ghost">Preview</button>
+          <button id="prowlarr-import" class="primary">Import</button>
+          <span class="muted" id="prowlarr-status"></span>
+        </div>
+      </div>
+
+      <div class="glass card">
+        <div class="card-head">
+          <h2>Tracker settings</h2>
+          <select id="tracker-picker"></select>
+        </div>
+        <div id="plugin-detail"></div>
+        <div class="card-foot">
+          <button id="save-trackers" class="primary">Save trackers</button>
+          <span class="muted" id="trackers-saved"></span>
+        </div>
+      </div>
+
+      <div class="glass card">
+        <div class="card-head">
+          <h2>Account stats</h2>
+          <span class="muted">Tracker totals, checked against what you are actually seeding.</span>
+        </div>
+        <div id="tracker-stats" class="muted">Loading…</div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="panel" id="tab-settings">
+      <div class="glass card">
+        <div class="card-head"><h2>Settings</h2></div>
+        <div id="settings-form" class="settings-grid"></div>
+        <div class="card-foot">
+          <button id="save-settings" class="primary">Save settings</button>
+          <button id="test-notify" class="ghost">Send test notification</button>
+          <span class="muted" id="settings-saved"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Logs -->
+    <section class="panel" id="tab-logs">
+      <div class="glass card">
+        <div class="card-head">
+          <h2>Log console</h2>
+          <select id="log-level">
+            <option value="">all</option>
+            <option value="INFO">info+</option>
+            <option value="WARNING">warning+</option>
+            <option value="ERROR">error</option>
+          </select>
+        </div>
+        <pre id="log-console"></pre>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

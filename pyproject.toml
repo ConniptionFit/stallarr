@@ -1,0 +1,39 @@
+[project]
+name = "stallarr"
+version = "0.1.0"
+description = "Watches your torrents for stalls, tracker errors and hit-and-run risk, then repairs them automatically."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    "pydantic>=2.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.25", "ruff>=0.8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+# BLE/E402 are enabled so the `noqa` comments justifying them stay meaningful.
+extend-select = ["B", "BLE", "E402", "RUF", "UP", "C4", "FURB"]
+# B008: FastAPI's Depends()/Body() in defaults is the framework's own idiom.
+ignore = ["B008", "UP047"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/conftest.py" = ["E402"]  # DATA_DIR must be set before stallarr imports
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,6 @@
+# Ranges rather than hard pins: the image builds on 3.12, but the test suite
+# also has to run on whatever Python the dev box has.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+httpx>=0.28,<1.0
+pydantic>=2.10,<3.0

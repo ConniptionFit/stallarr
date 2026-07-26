@@ -1,0 +1,227 @@
+:root {
+  --bg: #0b0f16;
+  --bg-glow-1: #1b2a4a;
+  --bg-glow-2: #2a1b3d;
+  --glass: rgba(255, 255, 255, 0.045);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --text: #e6ebf2;
+  --muted: #8b98ab;
+  --accent: #5b9dff;
+  --ok: #3fb950;
+  --info: #4b9fe2;
+  --warn: #e0a800;
+  --crit: #e24c4b;
+  --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font: 14px/1.5 "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(900px 600px at 12% -8%, var(--bg-glow-1), transparent 60%),
+    radial-gradient(800px 600px at 92% 4%, var(--bg-glow-2), transparent 55%),
+    var(--bg);
+  background-attachment: fixed;
+}
+
+.hidden { display: none !important; }
+/* The `hidden` attribute is a UA-stylesheet rule, so *any* author rule setting
+   `display` silently defeats it — `.pill { display: inline-block }` left the DRY
+   RUN badge permanently lit regardless of state. Restate it as an author rule so
+   `el.hidden = true` works on styled elements too. */
+[hidden] { display: none !important; }
+.muted { color: var(--muted); font-size: 12px; }
+code { background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 5px; font-size: 12px; }
+
+.glass {
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* --- login ------------------------------------------------------------- */
+.login-shell { display: grid; place-items: center; min-height: 100vh; padding: 20px; }
+.login-card { padding: 32px; width: min(360px, 100%); display: grid; gap: 12px; }
+.login-card h1 { margin: 0; font-size: 26px; letter-spacing: -.4px; }
+.login-card form { display: grid; gap: 12px; }
+.error { color: var(--crit); min-height: 18px; margin: 0; font-size: 12px; }
+
+/* The SSO control is an <a>, not a <button>: it is a plain navigation the
+   browser must follow so the IdP can set its own session cookies. Borrow the
+   button styling rather than the behaviour. */
+.sso-button {
+  display: block; text-align: center; text-decoration: none;
+  padding: 9px 14px; border-radius: 10px; font: inherit; font-weight: 600;
+  background: linear-gradient(180deg, #4d8ef0, #3a72cc);
+  border: 1px solid #4d8ef0; color: #fff;
+}
+.sso-button:hover { background: linear-gradient(180deg, #5e9bf5, #4480dd); }
+.or-divider { text-align: center; margin: 0; font-size: 12px; }
+
+/* --- chrome ------------------------------------------------------------ */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 14px 20px; margin: 18px 20px 0;
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.logo { font-size: 26px; }
+.brand h1 { margin: 0; font-size: 19px; letter-spacing: -.3px; }
+.topbar-actions { display: flex; align-items: center; gap: 10px; }
+
+.tabs { display: flex; gap: 6px; padding: 14px 20px 0; flex-wrap: wrap; }
+.tab {
+  background: transparent; border: 1px solid transparent; color: var(--muted);
+  padding: 8px 14px; border-radius: 10px; cursor: pointer; font-size: 13px;
+  transition: background .15s, color .15s;
+}
+.tab:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.tab.active { color: var(--text); background: rgba(91,157,255,.14); border-color: rgba(91,157,255,.3); }
+
+main { padding: 16px 20px 48px; }
+.panel { display: none; }
+.panel.active { display: block; }
+
+.card { padding: 18px; margin-bottom: 18px; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.card-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.card-foot { display: flex; align-items: center; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+
+/* --- controls ---------------------------------------------------------- */
+button {
+  font: inherit; cursor: pointer; border-radius: 9px; padding: 8px 14px;
+  border: 1px solid var(--glass-border); background: rgba(255,255,255,.06); color: var(--text);
+  transition: background .15s, border-color .15s, transform .05s;
+}
+button:hover { background: rgba(255,255,255,.1); }
+button:active { transform: translateY(1px); }
+button.primary { background: linear-gradient(180deg, #4d8ef0, #3a72cc); border-color: #4d8ef0; color: #fff; }
+button.primary:hover { background: linear-gradient(180deg, #5e9bf5, #4480dd); }
+button.ghost { background: transparent; }
+button.tiny { padding: 4px 9px; font-size: 12px; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+
+input, select, textarea {
+  font: inherit; color: var(--text); background: rgba(0,0,0,.28);
+  border: 1px solid var(--glass-border); border-radius: 9px; padding: 8px 11px; width: 100%;
+}
+input:focus, select:focus { outline: none; border-color: var(--accent); }
+input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+label.inline { display: inline-flex; align-items: center; gap: 7px; }
+
+/* --- stats ------------------------------------------------------------- */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.stat {
+  padding: 16px 18px; border-radius: var(--radius);
+  background: var(--glass); border: 1px solid var(--glass-border);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+}
+.stat .value { font-size: 26px; font-weight: 650; letter-spacing: -.5px; }
+.stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; margin-top: 2px; }
+.stat .sub { color: var(--muted); font-size: 11px; margin-top: 6px; }
+.stat.ok .value { color: var(--ok); }
+.stat.warn .value { color: var(--warn); }
+.stat.crit .value { color: var(--crit); }
+
+/* --- tables ------------------------------------------------------------ */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th {
+  text-align: left; font-weight: 600; color: var(--muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: .6px; padding: 8px 10px;
+  border-bottom: 1px solid var(--glass-border); white-space: nowrap;
+}
+td { padding: 10px; border-bottom: 1px solid rgba(255,255,255,.045); vertical-align: top; }
+tbody tr:hover { background: rgba(255,255,255,.03); }
+td.name { max-width: 380px; word-break: break-word; }
+td.actions { white-space: nowrap; }
+.empty { text-align: center; color: var(--muted); padding: 26px; }
+
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+.dot.ok { background: var(--ok); }
+.dot.info { background: var(--info); }
+.dot.warn { background: var(--warn); }
+.dot.crit { background: var(--crit); }
+
+.pill {
+  display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px;
+  background: rgba(255,255,255,.08); border: 1px solid var(--glass-border); white-space: nowrap;
+}
+.pill.ok { background: rgba(63,185,80,.14); border-color: rgba(63,185,80,.35); color: #79d68a; }
+.pill.bad { background: rgba(226,76,75,.14); border-color: rgba(226,76,75,.35); color: #f08281; }
+.pill.warn { background: rgba(224,168,0,.14); border-color: rgba(224,168,0,.35); color: #e8bf4d; }
+#dry-run-pill { background: rgba(224,168,0,.18); border-color: rgba(224,168,0,.4); color: #e8bf4d; }
+
+.bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,.09); overflow: hidden; min-width: 64px; }
+.bar > i { display: block; height: 100%; background: linear-gradient(90deg, #4d8ef0, #7fb2ff); }
+
+/* --- plugins ----------------------------------------------------------- */
+.plugin-list { display: grid; gap: 14px; }
+.plugin {
+  border: 1px solid var(--glass-border); border-radius: var(--radius);
+  padding: 15px; background: rgba(0,0,0,.16);
+}
+.plugin-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.plugin-head strong { font-size: 14px; }
+.plugin-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.field { display: grid; gap: 5px; }
+.field label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.caps { display: flex; gap: 5px; flex-wrap: wrap; }
+
+/* Explanatory text under an input: why it is locked, or where a value comes
+   from. Must read as secondary to the field itself. */
+.hint { font-size: 11px; line-height: 1.45; text-transform: none; letter-spacing: 0; }
+.hint code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 5px; font-size: 10.5px; }
+.note { font-size: 12px; line-height: 1.5; margin: 14px 0 0; }
+.note code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 5px; }
+
+/* An env-pinned setting is real config, just not editable here. Dim it rather
+   than hiding it, so it is obvious the value is in force. */
+.field.pinned input, .field.pinned select { opacity: .55; cursor: not-allowed; }
+.field.pinned > label { color: var(--warn); }
+
+#tracker-picker { width: auto; min-width: 230px; }
+
+/* --- settings ---------------------------------------------------------- */
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.settings-group { grid-column: 1 / -1; margin-top: 6px; }
+.settings-group h3 {
+  margin: 0 0 4px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: .8px; color: var(--accent);
+}
+.settings-group p { margin: 0; }
+
+/* --- logs -------------------------------------------------------------- */
+#log-console {
+  margin: 0; max-height: 62vh; overflow: auto; font-size: 12px; line-height: 1.65;
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  background: rgba(0,0,0,.34); border-radius: 10px; padding: 14px; white-space: pre-wrap;
+}
+.log-INFO { color: #9fb3c8; }
+.log-DEBUG { color: #6b7a8d; }
+.log-WARNING { color: #e8bf4d; }
+.log-ERROR, .log-CRITICAL { color: #f08281; }
+
+/* --- toast ------------------------------------------------------------- */
+.toast {
+  position: fixed; right: 20px; bottom: 20px; z-index: 50;
+  padding: 12px 17px; border-radius: 11px; max-width: 380px;
+  background: rgba(20,26,36,.94); border: 1px solid var(--glass-border);
+  backdrop-filter: blur(12px); box-shadow: 0 10px 34px rgba(0,0,0,.45);
+  animation: rise .18s ease-out;
+}
+.toast.bad { border-color: rgba(226,76,75,.5); }
+.toast.good { border-color: rgba(63,185,80,.5); }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+@media (max-width: 640px) {
+  .topbar { flex-direction: column; align-items: flex-start; }
+  main { padding: 14px 12px 40px; }
+  .topbar, .tabs { margin-inline: 12px; padding-inline: 14px; }
+}
