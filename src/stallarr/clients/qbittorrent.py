@@ -341,3 +341,21 @@ class QbittorrentClient:
             "/torrents/delete",
             {"hashes": infohash, "deleteFiles": "true" if delete_files else "false"},
         )
+
+    async def free_space(self) -> int | None:
+        resp = await self._get("/sync/maindata", params={"rid": "0"})
+        try:
+            value = resp.json().get("server_state", {}).get("free_space_on_disk")
+        except ValueError:
+            return None
+        return int(value) if isinstance(value, (int, float)) else None
+
+    async def export_torrent(self, infohash: str) -> bytes:
+        resp = await self._get("/torrents/export", params={"hash": infohash})
+        data = resp.content
+        # A bencoded dict starts with 'd'. qBittorrent answers 200 with an HTML
+        # error page on some failures, and silently writing that to the
+        # graveyard would leave a file that looks like a backup and is not one.
+        if not data.startswith(b"d"):
+            raise ClientError(f"export for {infohash[:8]} was not a .torrent file")
+        return data

@@ -24,6 +24,12 @@ library at once. So:
     torrents rather than all of them.
   * **Dry run**, which reports what it would delete and touches nothing.
 
+Against the case none of those cover — a tracker that is simply wrong for a day
+— each torrent's `.torrent` file is written to a graveyard directory first, and
+a failure to write it cancels that deletion. The data is still gone, but
+re-adding becomes a file away rather than a re-download from a site that may no
+longer have it.
+
 None of these help against a tracker that is genuinely wrong for a day. That is
 why the whole thing is off by default, and why deleting files is a second
 switch rather than a flag on the first.
@@ -31,12 +37,14 @@ switch rather than a flag on the first.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections import Counter
+from pathlib import Path
 
 from ..clients.base import ClientError, TorrentClient
-from ..config import RecoveryConfig
+from ..config import DATA_DIR, RecoveryConfig
 from ..models import ActionKind, ActionResult, Ailment, Diagnosis
 from ..utils import human_bytes
 
@@ -68,12 +76,18 @@ def condemned(diagnoses: list[Diagnosis]) -> list[Diagnosis]:
     ]
 
 
-def tripped_breakers(
+def breaker_report(
     diagnoses: list[Diagnosis], totals: dict[str, int], fraction: float
-) -> set[str]:
-    """Trackers reporting too many deletions at once to be believed."""
+) -> dict[str, dict[str, object]]:
+    """Trackers reporting too many deletions at once to be believed, and why.
+
+    Returns detail rather than a bare set so the UI can say what is being held
+    and on what evidence. A breaker that trips silently is indistinguishable
+    from having nothing to delete, which is how a guard stops being noticed and
+    then stops being trusted.
+    """
     counts = Counter(tracker_of(d) for d in condemned(diagnoses))
-    tripped = set()
+    tripped: dict[str, dict[str, object]] = {}
     for tracker, count in counts.items():
         total = totals.get(tracker, 0)
         if not total:
@@ -81,12 +95,26 @@ def tripped_breakers(
             # For a step that erases data, "cannot judge" has to mean "do not
             # act" — the caller counts every torrent it diagnosed, so a missing
             # total is a bug, and failing open would make that bug destructive.
-            tripped.add(tracker)
+            tripped[tracker] = {
+                "tracker": tracker,
+                "condemned": count,
+                "total": 0,
+                "fraction": None,
+                "limit": fraction,
+                "reason": "no torrent count to judge against",
+            }
             log.error("refusing to delete on %s: no torrent count to judge %d deletion(s) against",
                       tracker, count)
             continue
         if count / total > fraction:
-            tripped.add(tracker)
+            tripped[tracker] = {
+                "tracker": tracker,
+                "condemned": count,
+                "total": total,
+                "fraction": count / total,
+                "limit": fraction,
+                "reason": "looks like a tracker fault rather than real deletions",
+            }
             log.error(
                 "refusing to delete on %s: %d of %d torrent(s) (%.0f%%) came back unregistered, "
                 "which looks like a tracker fault rather than %d real deletions",
@@ -97,6 +125,13 @@ def tripped_breakers(
                 count,
             )
     return tripped
+
+
+def tripped_breakers(
+    diagnoses: list[Diagnosis], totals: dict[str, int], fraction: float
+) -> set[str]:
+    """Just the names, for the decision itself."""
+    return set(breaker_report(diagnoses, totals, fraction))
 
 
 async def reap(
@@ -119,7 +154,10 @@ async def reap(
     ages: dict[str, int] = {}
     for diagnosis in doomed:
         ages[diagnosis.torrent.infohash] = await db.condemn(
-            diagnosis.torrent.infohash, diagnosis.torrent.name, tracker_of(diagnosis)
+            diagnosis.torrent.infohash,
+            diagnosis.torrent.name,
+            tracker_of(diagnosis),
+            diagnosis.torrent.size,
         )
 
     if not (cfg.enabled and cfg.delete_unregistered) or not doomed:
@@ -164,18 +202,84 @@ async def _delete(
             dry_run=True,
         )
 
+    # Before the irreversible step, never after: an export that fails once the
+    # torrent is gone cannot be retried.
+    export_path = ""
+    if cfg.delete_export_torrents:
+        try:
+            export_path = await _export(client, diagnosis, cfg)
+        except (ClientError, OSError) as exc:
+            # Cancel this torrent's deletion rather than proceed unrecorded.
+            # It stays condemned and will be retried next scan, so a permanent
+            # failure here shows up as "nothing is being deleted" — visible,
+            # and the safe direction to fail in.
+            log.error("not deleting %s: could not keep its .torrent (%s)", torrent.name[:60], exc)
+            return ActionResult(
+                ActionKind.DELETE, False, f"kept: could not export its .torrent first ({exc})"
+            )
+
     try:
         await client.delete(torrent.infohash, delete_files=cfg.delete_unregistered_files)
     except ClientError as exc:
         return ActionResult(ActionKind.DELETE, False, f"client refused the delete: {exc}")
 
+    reason = diagnosis.primary.detail if diagnosis.primary else "unregistered"
+    # Permanent, and outside `history`'s retention window: this is the one
+    # event that still needs an answer long after the logs have rolled.
+    await db.record_deletion(
+        infohash=torrent.infohash,
+        name=torrent.name,
+        tracker=tracker_of(diagnosis),
+        size=torrent.size,
+        files_deleted=cfg.delete_unregistered_files,
+        reason=reason,
+        condemned_at=ages[torrent.infohash],
+        export_path=export_path,
+    )
+
     # Only once the client has confirmed, and only this torrent's row — clearing
     # the ledger wholesale would restart every other torrent's soak period.
     await db.clear_attempts(torrent.infohash)
     await db.reprieve(torrent.infohash)
+    kept = f", .torrent kept at {export_path}" if export_path else ""
     return ActionResult(
         ActionKind.DELETE,
         True,
-        f"deleted ({what}) — {diagnosis.primary.detail if diagnosis.primary else 'unregistered'}, "
-        f"confirmed for {held:.0f}h",
+        f"deleted ({what}) — {reason}, confirmed for {held:.0f}h{kept}",
     )
+
+
+async def _export(client: TorrentClient, diagnosis: Diagnosis, cfg: RecoveryConfig) -> str:
+    """Write the torrent's metainfo to the graveyard, returning where it went.
+
+    Named by infohash rather than release name: names are not unique, not
+    filesystem-safe, and not stable, and this file's whole job is to be findable
+    again from a history row.
+    """
+    data = await client.export_torrent(diagnosis.torrent.infohash)
+
+    directory = Path(cfg.delete_export_dir or "graveyard")
+    if not directory.is_absolute():
+        directory = DATA_DIR / directory
+    directory.mkdir(parents=True, exist_ok=True)
+
+    path = directory / f"{diagnosis.torrent.infohash}.torrent"
+    path.write_bytes(data)
+    # Alongside it, enough context to know what the file was without the
+    # database: the infohash filename alone says nothing to a human.
+    path.with_suffix(".json").write_text(
+        json.dumps(
+            {
+                "infohash": diagnosis.torrent.infohash,
+                "name": diagnosis.torrent.name,
+                "tracker": tracker_of(diagnosis),
+                "size": diagnosis.torrent.size,
+                "reason": diagnosis.primary.detail if diagnosis.primary else "unregistered",
+                "deleted_at": int(time.time()),
+                "files_deleted": cfg.delete_unregistered_files,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return str(path)

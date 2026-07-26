@@ -9,6 +9,8 @@ every test here is about that failure, not about the happy path.
 from __future__ import annotations
 
 import asyncio
+import json
+import pathlib
 import time
 import uuid
 
@@ -17,17 +19,19 @@ import pytest
 from stallarr import db
 from stallarr.config import RecoveryConfig
 from stallarr.models import Ailment, Diagnosis, Finding, Torrent, TorrentState, TrackerEntry
-from stallarr.recovery.reap import reap, tracker_of, tripped_breakers
+from stallarr.recovery.reap import breaker_report, reap, tracker_of, tripped_breakers
 
 pytestmark = pytest.mark.asyncio
 
 
 class FakeClient:
-    """Records deletes; can be told to refuse them."""
+    """Records deletes and exports; can be told to refuse either."""
 
-    def __init__(self, fail: bool = False):
+    def __init__(self, fail: bool = False, export_fail: bool = False):
         self.deleted: list[tuple[str, bool]] = []
+        self.exported: list[str] = []
         self.fail = fail
+        self.export_fail = export_fail
 
     async def delete(self, infohash: str, delete_files: bool = False) -> None:
         if self.fail:
@@ -36,11 +40,26 @@ class FakeClient:
             raise ClientError("qBittorrent said no")
         self.deleted.append((infohash, delete_files))
 
+    async def export_torrent(self, infohash: str) -> bytes:
+        if self.export_fail:
+            from stallarr.clients.base import ClientError
+
+            raise ClientError("qBittorrent has no metainfo for this")
+        self.exported.append(infohash)
+        return b"d8:announce4:htted"
+
+
+#: Where exported .torrent files go during tests. Set per-test by the fixture
+#: below so nothing is ever written into the real data directory.
+EXPORT_DIR = ""
+
 
 @pytest.fixture(autouse=True)
-async def _db():
+async def _db(tmp_path):
+    global EXPORT_DIR
+    EXPORT_DIR = str(tmp_path / "graveyard")
     await db.init()
-    for table in ("condemned", "history", "attempts"):
+    for table in ("condemned", "history", "attempts", "deletions"):
         await asyncio.to_thread(db._exec, f"DELETE FROM {table}", ())
 
 
@@ -75,6 +94,7 @@ def cfg(**kwargs) -> RecoveryConfig:
         "delete_min_age_hours": 24,
         "delete_max_per_scan": 5,
         "delete_max_tracker_fraction": 0.10,
+        "delete_export_dir": EXPORT_DIR,
     }
     return RecoveryConfig(**{**base, **kwargs})
 
@@ -336,3 +356,140 @@ async def test_a_deleted_torrent_leaves_no_ledger_row_behind():
     await soak(client, d, cfg(), {"seedpool": 100})
 
     assert await db.list_condemned() == []
+
+
+# --- keeping the .torrent -----------------------------------------------------
+
+
+async def test_the_torrent_file_is_kept_before_the_data_goes():
+    client, d = FakeClient(), diagnosis()
+
+    await soak(client, d, cfg(delete_unregistered_files=True), {"seedpool": 100})
+
+    kept = pathlib.Path(EXPORT_DIR) / f"{d.torrent.infohash}.torrent"
+    assert kept.read_bytes().startswith(b"d")
+    assert client.exported == [d.torrent.infohash]
+
+
+async def test_the_kept_file_carries_enough_context_to_identify_it():
+    """The file is named by infohash, which tells a human nothing on its own."""
+    client, d = FakeClient(), diagnosis("Some.Great.Show.S01E01-GRP")
+
+    await soak(client, d, cfg(), {"seedpool": 100})
+
+    side = pathlib.Path(EXPORT_DIR) / f"{d.torrent.infohash}.json"
+    meta = json.loads(side.read_text())
+    assert meta["name"] == "Some.Great.Show.S01E01-GRP"
+    assert meta["tracker"] == "seedpool"
+    assert meta["reason"] == "no longer listed"
+
+
+async def test_a_failed_export_cancels_the_deletion():
+    """The export exists to make this recoverable. Deleting anyway would erase
+    the thing it was protecting, so the failure has to stop the delete."""
+    client, d = FakeClient(export_fail=True), diagnosis()
+
+    results = await soak(client, d, cfg(delete_unregistered_files=True), {"seedpool": 100})
+
+    assert client.deleted == []
+    assert not results[0][1].ok and "could not export" in results[0][1].message
+    # Still condemned, so it retries rather than quietly never being considered.
+    assert [r["infohash"] for r in await db.list_condemned()] == [d.torrent.infohash]
+
+
+async def test_the_export_can_be_switched_off():
+    client, d = FakeClient(export_fail=True), diagnosis()
+
+    results = await soak(client, d, cfg(delete_export_torrents=False), {"seedpool": 100})
+
+    assert results[0][1].ok and client.deleted == [(d.torrent.infohash, False)]
+    assert client.exported == []
+
+
+async def test_a_dry_run_writes_no_file():
+    client, d = FakeClient(), diagnosis()
+
+    await soak(client, d, cfg(dry_run=True), {"seedpool": 100})
+
+    assert client.exported == []
+    assert not pathlib.Path(EXPORT_DIR).exists()
+
+
+# --- the permanent record -----------------------------------------------------
+
+
+async def test_a_deletion_is_recorded_permanently():
+    """`history` is pruned to a retention window; this must outlive it."""
+    client, d = FakeClient(), diagnosis("Gone.Forever-GRP", size=5 * 1024**3)
+
+    await soak(client, d, cfg(delete_unregistered_files=True), {"seedpool": 100})
+
+    (row,) = await db.list_deletions()
+    assert row["name"] == "Gone.Forever-GRP"
+    assert row["tracker"] == "seedpool"
+    assert row["size"] == 5 * 1024**3
+    assert row["files_deleted"] == 1
+    assert row["reason"] == "no longer listed"
+    assert row["export_path"].endswith(f"{d.torrent.infohash}.torrent")
+
+
+async def test_pruning_history_does_not_touch_the_deletion_record():
+    client, d = FakeClient(), diagnosis()
+    await soak(client, d, cfg(), {"seedpool": 100})
+
+    await db.prune_history(0)
+
+    assert len(await db.list_deletions()) == 1
+
+
+async def test_only_deletions_that_took_the_data_count_as_reclaimed():
+    """Removing the torrent entry alone frees nothing, and reporting it as
+    reclaimed space would overstate what this feature actually did."""
+    client = FakeClient()
+    entry_only, with_data = diagnosis("A", size=1024**3), diagnosis("B", size=2 * 1024**3)
+
+    await soak(client, entry_only, cfg(delete_unregistered_files=False), {"seedpool": 100})
+    await soak(client, with_data, cfg(delete_unregistered_files=True), {"seedpool": 100})
+
+    totals = await db.deletion_totals(7)
+    assert totals["count"] == 2
+    assert totals["bytes"] == 3 * 1024**3
+    assert totals["reclaimed"] == 2 * 1024**3
+
+
+async def test_a_failed_delete_is_not_recorded_as_one():
+    client, d = FakeClient(fail=True), diagnosis()
+
+    await soak(client, d, cfg(), {"seedpool": 100})
+
+    assert await db.list_deletions() == []
+
+
+# --- explaining a tripped breaker ---------------------------------------------
+
+
+async def test_a_tripped_breaker_reports_what_it_saw():
+    """A guard that trips silently reads exactly like having nothing to do."""
+    doomed = [diagnosis(f"R{i}") for i in range(30)]
+
+    report = breaker_report(doomed, {"seedpool": 100}, 0.10)
+
+    assert set(report) == {"seedpool"}
+    assert report["seedpool"]["condemned"] == 30
+    assert report["seedpool"]["total"] == 100
+    assert report["seedpool"]["fraction"] == pytest.approx(0.30)
+    assert report["seedpool"]["limit"] == 0.10
+
+
+async def test_a_missing_denominator_is_reported_as_its_own_reason():
+    report = breaker_report([diagnosis()], {}, 0.10)
+
+    assert report["seedpool"]["total"] == 0
+    assert report["seedpool"]["fraction"] is None
+    assert "no torrent count" in report["seedpool"]["reason"]
+
+
+async def test_nothing_is_reported_when_the_share_is_believable():
+    doomed = [diagnosis(f"R{i}") for i in range(3)]
+
+    assert breaker_report(doomed, {"seedpool": 100}, 0.10) == {}

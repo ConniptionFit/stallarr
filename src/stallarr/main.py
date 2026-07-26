@@ -6,7 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config as config_module
 from .logging_setup import setup as setup_logging
 from .service import StallarrService
+from .web.metrics import render as render_metrics
 from .web.routes import build_router, require_auth
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,16 @@ def create_app() -> FastAPI:
         @app.get("/", include_in_schema=False)
         async def index() -> FileResponse:
             return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        service: StallarrService = app.state.service
+        # Checked per request, not at startup: the setting is editable in the
+        # UI and a reload must be able to close this endpoint again.
+        if not service.cfg.web.metrics_enabled:
+            raise HTTPException(status_code=404, detail="metrics are not enabled")
+        body = await render_metrics(service)
+        return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.get("/health", include_in_schema=False)
     async def health() -> dict:

@@ -23,6 +23,8 @@ from typing import Any
 
 from .config import DATA_DIR
 
+log = logging.getLogger(__name__)
+
 DB_DIR = Path(os.environ.get("STALLARR_DB_DIR") or DATA_DIR)
 DB_PATH = DB_DIR / "stallarr.db"
 
@@ -98,9 +100,53 @@ CREATE TABLE IF NOT EXISTS condemned (
     infohash    TEXT PRIMARY KEY,
     name        TEXT NOT NULL DEFAULT '',
     tracker     TEXT NOT NULL DEFAULT '',
-    first_at    INTEGER NOT NULL
+    first_at    INTEGER NOT NULL,
+    size        INTEGER NOT NULL DEFAULT 0
 );
+
+-- Every torrent stallarr has actually deleted. Deliberately *not* covered by
+-- `prune_history`: the history table answers "what happened lately" and is
+-- trimmed to `history_retention_days`, but the one irreversible thing this
+-- program does has to stay answerable long after that window closes. A row is
+-- written only when a delete really happened, so the table grows by the
+-- handful, not by the scan.
+CREATE TABLE IF NOT EXISTS deletions (
+    infohash      TEXT PRIMARY KEY,
+    name          TEXT NOT NULL DEFAULT '',
+    tracker       TEXT NOT NULL DEFAULT '',
+    size          INTEGER NOT NULL DEFAULT 0,
+    files_deleted INTEGER NOT NULL DEFAULT 0,
+    reason        TEXT NOT NULL DEFAULT '',
+    condemned_at  INTEGER NOT NULL DEFAULT 0,
+    deleted_at    INTEGER NOT NULL,
+    export_path   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_deletions_at ON deletions (deleted_at DESC);
+
+-- One row per completed scan: the numbers the dashboard shows, kept over time.
+-- Everything else here is "right now", which cannot answer whether a tracker's
+-- unregistered share is a step change or a slow drift — the exact question the
+-- deletion circuit breaker's threshold turns on.
+CREATE TABLE IF NOT EXISTS scan_snapshots (
+    ts        INTEGER PRIMARY KEY,
+    total     INTEGER NOT NULL DEFAULT 0,
+    healthy   INTEGER NOT NULL DEFAULT 0,
+    sick      INTEGER NOT NULL DEFAULT 0,
+    skipped   INTEGER NOT NULL DEFAULT 0,
+    actions   INTEGER NOT NULL DEFAULT 0,
+    condemned INTEGER NOT NULL DEFAULT 0,
+    owed      INTEGER NOT NULL DEFAULT 0,
+    duration  REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON scan_snapshots (ts DESC);
 """
+
+#: Columns added after a table first shipped. `CREATE TABLE IF NOT EXISTS` does
+#: nothing to a database that already has the table, so additive changes need
+#: their own idempotent step or they only ever exist on fresh installs.
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("condemned", "size", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 
 #: Resolved once on first connect: "wal" locally, "delete" on network shares.
@@ -152,6 +198,12 @@ def _connect() -> sqlite3.Connection:
 def _init_sync() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        for table, column, spec in _MIGRATIONS:
+            existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
+                log.info("migrated: added %s.%s", table, column)
+        conn.commit()
 
 
 async def init() -> None:
@@ -308,7 +360,7 @@ async def prune_tracker_checks(retention_days: int) -> None:
 # --- condemned torrents -------------------------------------------------------
 
 
-def _condemn_sync(infohash: str, name: str, tracker: str) -> int:
+def _condemn_sync(infohash: str, name: str, tracker: str, size: int) -> int:
     """Record this torrent as unregistered, returning when that first became so.
 
     A torrent already known to have been unregistered gets its original
@@ -321,6 +373,13 @@ def _condemn_sync(infohash: str, name: str, tracker: str) -> int:
             "SELECT first_at FROM condemned WHERE infohash = ?", (infohash,)
         ).fetchone()
         if row:
+            # Size can arrive late (an older row predates the column), but the
+            # clock must not move.
+            conn.execute(
+                "UPDATE condemned SET name = ?, tracker = ?, size = ? WHERE infohash = ?",
+                (name, tracker, size, infohash),
+            )
+            conn.commit()
             return int(row["first_at"])
 
         # No live record. History may still show when this verdict was first
@@ -332,15 +391,15 @@ def _condemn_sync(infohash: str, name: str, tracker: str) -> int:
         ).fetchone()
         first_at = int(seen["first"]) if seen and seen["first"] else now
         conn.execute(
-            "INSERT INTO condemned (infohash, name, tracker, first_at) VALUES (?, ?, ?, ?)",
-            (infohash, name, tracker, first_at),
+            "INSERT INTO condemned (infohash, name, tracker, first_at, size) VALUES (?, ?, ?, ?, ?)",
+            (infohash, name, tracker, first_at, size),
         )
         conn.commit()
     return first_at
 
 
-async def condemn(infohash: str, name: str = "", tracker: str = "") -> int:
-    return await asyncio.to_thread(_condemn_sync, infohash, name, tracker)
+async def condemn(infohash: str, name: str = "", tracker: str = "", size: int = 0) -> int:
+    return await asyncio.to_thread(_condemn_sync, infohash, name, tracker, size)
 
 
 def _sync_condemned_sync(current: set[str]) -> int:
@@ -371,6 +430,122 @@ async def reprieve(infohash: str) -> None:
 
 async def list_condemned() -> list[dict[str, Any]]:
     return await asyncio.to_thread(_rows, "SELECT * FROM condemned ORDER BY first_at", ())
+
+
+# --- completed deletions (permanent) ------------------------------------------
+
+
+async def record_deletion(
+    *,
+    infohash: str,
+    name: str,
+    tracker: str,
+    size: int,
+    files_deleted: bool,
+    reason: str,
+    condemned_at: int,
+    export_path: str = "",
+) -> None:
+    """Write the permanent record of a torrent stallarr removed.
+
+    `INSERT OR REPLACE` rather than plain insert: re-adding and re-deleting the
+    same infohash should leave one row describing the latest removal, not fail.
+    """
+    await asyncio.to_thread(
+        _exec,
+        """INSERT OR REPLACE INTO deletions
+           (infohash, name, tracker, size, files_deleted, reason,
+            condemned_at, deleted_at, export_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            infohash,
+            name,
+            tracker,
+            int(size),
+            1 if files_deleted else 0,
+            reason,
+            int(condemned_at),
+            int(time.time()),
+            export_path,
+        ),
+    )
+
+
+async def list_deletions(limit: int = 200) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(
+        _rows, "SELECT * FROM deletions ORDER BY deleted_at DESC LIMIT ?", (limit,)
+    )
+
+
+async def deletion_totals(days: int = 7) -> dict[str, Any]:
+    """How much has been removed, all time and in the recent window.
+
+    The all-time figures are why the table is exempt from pruning: they are the
+    only answer to "what has this thing actually erased", and a 30-day history
+    window cannot give it.
+    """
+    cutoff = int(time.time()) - max(days, 0) * 86400
+    rows = await asyncio.to_thread(
+        _rows,
+        """SELECT
+               COUNT(*)                                        AS all_count,
+               COALESCE(SUM(size), 0)                          AS all_bytes,
+               COALESCE(SUM(size * files_deleted), 0)           AS all_reclaimed,
+               COALESCE(SUM(deleted_at >= ?), 0)               AS recent_count,
+               COALESCE(SUM(CASE WHEN deleted_at >= ? THEN size * files_deleted ELSE 0 END), 0)
+                                                               AS recent_reclaimed
+           FROM deletions""",
+        (cutoff, cutoff),
+    )
+    row = rows[0] if rows else {}
+    return {
+        "window_days": days,
+        "count": int(row.get("all_count") or 0),
+        "bytes": int(row.get("all_bytes") or 0),
+        # Only deletes that took the data with them freed anything.
+        "reclaimed": int(row.get("all_reclaimed") or 0),
+        "recent_count": int(row.get("recent_count") or 0),
+        "recent_reclaimed": int(row.get("recent_reclaimed") or 0),
+    }
+
+
+# --- scan snapshots -----------------------------------------------------------
+
+
+async def record_snapshot(**fields: Any) -> None:
+    """One row per finished scan. Keyed by second, so a re-run replaces."""
+    await asyncio.to_thread(
+        _exec,
+        """INSERT OR REPLACE INTO scan_snapshots
+           (ts, total, healthy, sick, skipped, actions, condemned, owed, duration)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            int(fields.get("ts") or time.time()),
+            int(fields.get("total") or 0),
+            int(fields.get("healthy") or 0),
+            int(fields.get("sick") or 0),
+            int(fields.get("skipped") or 0),
+            int(fields.get("actions") or 0),
+            int(fields.get("condemned") or 0),
+            int(fields.get("owed") or 0),
+            float(fields.get("duration") or 0.0),
+        ),
+    )
+
+
+async def scan_history(days: int = 7, limit: int = 500) -> list[dict[str, Any]]:
+    cutoff = int(time.time()) - max(days, 0) * 86400
+    rows = await asyncio.to_thread(
+        _rows,
+        "SELECT * FROM scan_snapshots WHERE ts >= ? ORDER BY ts DESC LIMIT ?",
+        (cutoff, limit),
+    )
+    return list(reversed(rows))
+
+
+async def prune_snapshots(retention_days: int) -> None:
+    cutoff = int(time.time()) - retention_days * 86400
+    await asyncio.to_thread(_exec, "DELETE FROM scan_snapshots WHERE ts < ?", (cutoff,))
 
 
 # --- seeding obligations ------------------------------------------------------

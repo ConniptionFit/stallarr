@@ -64,3 +64,16 @@ class TorrentClient(Protocol):
     ) -> None: ...
 
     async def delete(self, infohash: str, delete_files: bool = False) -> None: ...
+
+    async def free_space(self) -> int | None:
+        """Bytes free where the client saves data, or None if it won't say."""
+        return None
+
+    async def export_torrent(self, infohash: str) -> bytes:
+        """The original .torrent metainfo, for keeping before a delete.
+
+        Not abstract, and raising rather than returning empty: a client that
+        cannot do this must fail loudly, because the caller's whole reason for
+        asking is to make an irreversible step recoverable.
+        """
+        raise ClientError("this client cannot export .torrent files")

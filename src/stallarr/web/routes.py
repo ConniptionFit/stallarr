@@ -329,6 +329,42 @@ def build_router() -> APIRouter:
     async def list_ignores() -> dict:
         return {"ignores": await db.list_ignores()}
 
+    # --- deletions ------------------------------------------------------------
+
+    @router.get("/condemned", dependencies=guarded)
+    async def condemned(request: Request) -> dict:
+        return {"condemned": await _service(request).pending_deletions()}
+
+    @router.post("/condemned/{infohash}/keep", dependencies=guarded)
+    async def keep(infohash: str, payload: dict = Body(default={})) -> dict:
+        """Spare a torrent queued for deletion, permanently.
+
+        Reprieving alone would only reset the clock: the next scan would
+        re-condemn it and it would be deleted a day later, which is not what
+        anyone means by "keep". So it is also ignored, which is the existing
+        mechanism for "leave this one alone" and already excludes it from
+        diagnosis. There is nothing to repair on an unregistered torrent
+        anyway.
+        """
+        await db.add_ignore(
+            infohash,
+            payload.get("name", ""),
+            payload.get("reason", "") or "kept from automatic deletion",
+        )
+        await db.reprieve(infohash)
+        return {"ok": True, "detail": "kept — this torrent will not be deleted"}
+
+    @router.get("/deletions", dependencies=guarded)
+    async def deletions(limit: int = 200) -> dict:
+        return {
+            "deletions": await db.list_deletions(limit),
+            "totals": await db.deletion_totals(),
+        }
+
+    @router.get("/snapshots", dependencies=guarded)
+    async def snapshots(days: int = 7) -> dict:
+        return {"snapshots": await db.scan_history(days)}
+
     @router.post("/notify/test", dependencies=guarded)
     async def notify_test(request: Request) -> dict:
         return await _service(request).notifier.test()

@@ -160,6 +160,15 @@ class RecoveryConfig(BaseModel):
     #: range never fires on the fault it exists for and constantly fires on
     #: healthy libraries, which is how a safety rail ends up switched off.
     delete_max_tracker_fraction: float = 0.50
+    #: Keep each torrent's .torrent file before deleting it. The data is still
+    #: gone, but re-adding is then a file away instead of a re-download from a
+    #: tracker that may no longer have it — which matters precisely in the case
+    #: none of the other guards cover: a tracker that was genuinely wrong.
+    #: Failing to export *cancels* that torrent's deletion rather than
+    #: proceeding without a record.
+    delete_export_torrents: bool = True
+    #: Where those files go. Relative paths resolve inside the data directory.
+    delete_export_dir: str = "graveyard"
 
 
 class TrackerConfig(BaseModel):
@@ -183,6 +192,13 @@ class TrackerConfig(BaseModel):
     cookie_pass: str = ""
     #: Extra announce hostnames to match against, beyond the plugin defaults.
     extra_hosts: list[str] = Field(default_factory=list)
+    #: Warn when the account ratio on this tracker falls to or below this.
+    #: Per-tracker rather than global because the number that matters is the
+    #: site's own requirement, and those differ. 0 disables the check.
+    min_ratio: float = 0.0
+    #: Warn when hit-and-run count reaches this. Most sites allow a couple
+    #: before acting, so the useful alarm is "approaching", not "any at all".
+    max_hit_and_runs: int = 0
     options: dict[str, Any] = Field(default_factory=dict)
 
     # --- config-defined trackers ----------------------------------------------
@@ -253,6 +269,11 @@ class WebConfig(BaseModel):
     #: External URL the dashboard is reached on. Also the default source of the
     #: OIDC redirect URI, so set it before turning SSO on behind a proxy.
     base_url: str = ""
+    #: Serve Prometheus metrics at /metrics, without authentication — Prometheus
+    #: has no session to present. Off by default because the labels name the
+    #: private trackers you are on, which is more than an open endpoint should
+    #: volunteer about a host that may be reachable from the internet.
+    metrics_enabled: bool = False
 
     # --- single sign-on --------------------------------------------------------
     # OIDC authorization-code flow, run by stallarr itself rather than by a

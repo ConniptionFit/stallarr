@@ -20,7 +20,7 @@ from .config import Config
 from .diagnosis import diagnose_local, enrich, should_skip
 from .models import ActionResult, Ailment, Diagnosis, Finding, SeedingRequirement, Severity, Torrent
 from .notify import Notifier
-from .recovery import RecoveryEngine, reap, redownload, tracker_of
+from .recovery import RecoveryEngine, breaker_report, reap, redownload, tracker_of
 from .recovery.redownload import attempt_key as redownload_key
 from .trackers import TrackerRouter, load_plugins
 from .trackers.base import Capability, TrackerError
@@ -67,6 +67,12 @@ class StallarrService:
         #: Every outstanding seeding obligation, matched or not. Survives across
         #: scans so a debt clearing can be told apart from a fresh start.
         self.seeding_report: list[dict[str, str]] = []
+        #: Trackers whose deletions were refused on the last scan, with the
+        #: evidence. Held so the UI can explain a breaker that has quietly
+        #: stopped the feature working.
+        self.deletion_blocks: list[dict[str, Any]] = []
+        #: Free space reported by the client, refreshed each scan.
+        self.disk: dict[str, Any] = {}
         self.scanning = False
 
         self._scan_lock = asyncio.Lock()
@@ -208,6 +214,10 @@ class StallarrService:
                 await db.prune_history(self.cfg.history_retention_days)
                 await db.prune_seeding_obligations(self.cfg.history_retention_days)
                 await db.prune_tracker_checks(self.cfg.history_retention_days)
+                # Snapshots are kept far longer than history: they are tiny
+                # (one row per scan) and their whole value is showing drift
+                # over a span that a 30-day window would cut in half.
+                await db.prune_snapshots(max(self.cfg.history_retention_days * 6, 180))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -357,6 +367,8 @@ class StallarrService:
         summary.finished_at = time.time()
         self.last_scan = summary
         self.last_diagnoses = diagnoses
+        await self._refresh_disk()
+        await self._record_snapshot(summary)
         log.info(
             "scan complete: %d torrents, %d healthy, %d sick, %d actions in %.1fs",
             summary.total,
@@ -567,6 +579,15 @@ class StallarrService:
         if self.client is None or self.engine is None:
             return set()
 
+        # Computed here as well as inside `reap` — it is a cheap pure function
+        # over the same inputs, and the alternative is an out-parameter.
+        self.deletion_blocks = [
+            dict(detail)
+            for detail in breaker_report(
+                diagnoses, totals, self.cfg.recovery.delete_max_tracker_fraction
+            ).values()
+        ]
+
         try:
             outcomes = await reap(self.client, diagnoses, self.cfg.recovery, totals)
         except Exception:
@@ -595,6 +616,39 @@ class StallarrService:
                 " and their files" if self.cfg.recovery.delete_unregistered_files else "",
             )
         return gone
+
+    async def _record_snapshot(self, summary: ScanSummary) -> None:
+        """One row per finished scan, so the dashboard can show drift.
+
+        Never allowed to fail a scan: this is bookkeeping for a graph, and a
+        graph is not worth losing a repair run over.
+        """
+        try:
+            await db.record_snapshot(
+                ts=int(summary.finished_at),
+                total=summary.total,
+                healthy=summary.healthy,
+                sick=summary.sick,
+                skipped=summary.skipped,
+                actions=summary.actions,
+                condemned=len(await db.list_condemned()),
+                owed=len(self.seeding_report),
+                duration=summary.duration,
+            )
+        except Exception:
+            log.debug("could not record scan snapshot", exc_info=True)
+
+    async def _refresh_disk(self) -> None:
+        """Free space where the client writes, if it will tell us."""
+        if self.client is None:
+            return
+        try:
+            free = await self.client.free_space()
+        except ClientError as exc:
+            log.debug("could not read free space: %s", exc)
+            return
+        if free is not None:
+            self.disk = {"free": free}
 
     def _already_escalated(self, torrent: Torrent) -> bool:
         """Has stallarr already given up on this torrent and told a human?
@@ -677,15 +731,60 @@ class StallarrService:
             # Seeding owed on torrents the client does not hold — nothing here
             # can repair these, so they need to be visible rather than counted.
             "seeding_unmatched": self.seeding_unmatched,
+            # Trackers where deletion is currently refused, and on what evidence.
+            "deletion_blocks": self.deletion_blocks,
+            "disk": self.disk,
         }
 
     async def dashboard(self) -> dict[str, Any]:
-        """`snapshot()` plus the seeding metrics, which need a database read.
+        """`snapshot()` plus the parts that need a database read.
 
         Kept separate from `snapshot()` so that stays synchronous and cheap for
         every other caller.
         """
-        return {**self.snapshot(), "seeding": await self.seeding_metrics()}
+        return {
+            **self.snapshot(),
+            "seeding": await self.seeding_metrics(),
+            "deletions": await db.deletion_totals(SEEDING_WINDOW_DAYS),
+            "condemned": await self.pending_deletions(),
+        }
+
+    async def pending_deletions(self) -> list[dict[str, Any]]:
+        """Torrents queued for deletion, soonest-first, with why they are not
+        gone yet.
+
+        This is the one screen that has to exist before a destructive feature is
+        trustworthy: without it the only way to know what is about to be erased
+        is to read the log.
+        """
+        cfg = self.cfg.recovery
+        soak = max(cfg.delete_min_age_hours, 0) * 3600
+        blocked = {str(block["tracker"]) for block in self.deletion_blocks}
+        now = time.time()
+
+        rows = []
+        for row in await db.list_condemned():
+            eligible_at = row["first_at"] + soak
+            tracker = row["tracker"]
+            if not cfg.enabled or not cfg.delete_unregistered:
+                held = "deletion is switched off"
+            elif tracker in blocked:
+                held = "held: too many unregistered on this tracker to believe"
+            elif now < eligible_at:
+                held = f"waiting out the {cfg.delete_min_age_hours}h soak period"
+            else:
+                held = "eligible on the next scan"
+            plugin = self.router.get(tracker)
+            rows.append(
+                {
+                    **row,
+                    "tracker_name": (plugin.name if plugin else "") or tracker,
+                    "eligible_at": eligible_at,
+                    "status": held,
+                }
+            )
+        rows.sort(key=lambda r: r["eligible_at"])
+        return rows
 
     async def seeding_metrics(self, days: int = SEEDING_WINDOW_DAYS) -> dict[str, Any]:
         """Obligation counts, with tracker ids resolved to display names.
@@ -737,6 +836,9 @@ class StallarrService:
                     )
                     if stats.seeding is not None:
                         entry["unseen_seeds"] = max(entry["local_seeding"] - stats.seeding, 0)
+                    entry["warnings"] = _account_warnings(
+                        stats, self.cfg.trackers.get(plugin_id)
+                    )
 
             out[plugin_id] = entry
         return out
@@ -759,6 +861,28 @@ class StallarrService:
             if plugin is not None:
                 counts[plugin.id] = counts.get(plugin.id, 0) + 1
         return counts
+
+
+def _account_warnings(stats: Any, tracker_cfg: Any) -> list[str]:
+    """Account-level trouble that no per-torrent finding would ever surface.
+
+    Everything else in stallarr reacts to a torrent that has already gone wrong.
+    These two look at where the account is heading, which is the only warning
+    that arrives while there is still time to do something about it.
+    """
+    if tracker_cfg is None:
+        return []
+
+    warnings: list[str] = []
+    floor = getattr(tracker_cfg, "min_ratio", 0.0) or 0.0
+    if floor > 0 and stats.ratio is not None and stats.ratio <= floor:
+        warnings.append(f"ratio {stats.ratio:.2f} is at or below your {floor:.2f} floor")
+
+    limit = getattr(tracker_cfg, "max_hit_and_runs", 0) or 0
+    if limit > 0 and stats.hit_and_runs is not None and stats.hit_and_runs >= limit:
+        warnings.append(f"{stats.hit_and_runs} hit-and-run(s), at your limit of {limit}")
+
+    return warnings
 
 
 def _local_state(torrent: Torrent) -> str:
