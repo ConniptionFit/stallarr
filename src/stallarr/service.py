@@ -18,7 +18,16 @@ from . import db
 from .clients import ClientError, TorrentClient, build_client
 from .config import Config
 from .diagnosis import diagnose_local, enrich, should_skip
-from .models import ActionResult, Ailment, Diagnosis, Finding, SeedingRequirement, Severity, Torrent
+from .models import (
+    ActionResult,
+    Ailment,
+    Diagnosis,
+    Finding,
+    SeedingRequirement,
+    Severity,
+    Torrent,
+    TrackerFreeleechEntry,
+)
 from .notify import Notifier
 from .recovery import RecoveryEngine, breaker_report, reap, redownload, tracker_of
 from .recovery.redownload import attempt_key as redownload_key
@@ -32,6 +41,12 @@ log = logging.getLogger(__name__)
 #: hit-and-run deadline, and short enough that the numbers describe now; a day
 #: would read as zero most of the time on a library that is behaving.
 SEEDING_WINDOW_DAYS = 7
+
+#: How long a torrent keeps its "recently recovered" badge on the Seeding tab
+#: after a successful repair. Same rationale as SEEDING_WINDOW_DAYS: long
+#: enough that the badge is still meaningful, short enough that it describes
+#: now rather than the torrent's whole history.
+RECENTLY_RECOVERED_DAYS = 7
 
 
 @dataclass
@@ -411,6 +426,28 @@ class StallarrService:
                 out[plugin.id] = {normalise_release(r.name): r for r in rows}
                 log.info("%s: %d torrent(s) require seeding", plugin.id, len(rows))
         return out, answered
+
+    async def _freeleech_status(self) -> dict[str, dict[str, TrackerFreeleechEntry]]:
+        """Each tracker's freeleech status for our own torrents, keyed by
+        tracker then by normalised release name.
+
+        Best-effort and opt-in per plugin (`Capability.FREELEECH_STATUS`).
+        Failures are logged and dropped rather than raised, same as
+        `_seeding_requirements`: this feeds a dashboard view, not recovery, so
+        a sick tracker must not break the page.
+        """
+        out: dict[str, dict[str, TrackerFreeleechEntry]] = {}
+        for plugin in self.router.plugins.values():
+            if not plugin.can(Capability.FREELEECH_STATUS):
+                continue
+            try:
+                rows = await plugin.freeleech_status()
+            except Exception as exc:  # noqa: BLE001 - a sick tracker must not break the view
+                log.warning("%s: could not read freeleech status: %s", plugin.id, exc)
+                continue
+            if rows:
+                out[plugin.id] = {normalise_release(r.name): r for r in rows}
+        return out
 
     async def _record_obligations(
         self, requirements: dict[str, dict[str, SeedingRequirement]], answered: set[str]
@@ -842,6 +879,64 @@ class StallarrService:
 
             out[plugin_id] = entry
         return out
+
+    async def seeding_view(self) -> dict[str, Any]:
+        """Every actively-seeding torrent, grouped by tracker, for the Seeding tab.
+
+        Ratio, uploaded, seeding time and tags come free off the local
+        `Torrent` — no tracker call needed. Freeleech is best-effort and
+        opt-in per tracker (`Capability.FREELEECH_STATUS`); trackers without it
+        report `None`, not `False`. "Recently recovered" is inferred from
+        `history` rather than read off a flag, because tags are cleared the
+        moment a torrent actually recovers (`RecoveryEngine.on_recovered`) —
+        there is nothing left to read by the time this runs.
+
+        Called on demand from the route, not from the scan loop: this is
+        display data, not recovery state, so it should not inherit the scan's
+        cadence or error budget, the same reasoning `tracker_stats` already
+        follows for `user_stats()`.
+        """
+        if self.client is None:
+            return {"trackers": {}}
+        try:
+            torrents = await self.client.list_torrents()
+        except ClientError as exc:
+            log.debug("could not list torrents for seeding view: %s", exc)
+            return {"trackers": {}}
+
+        freeleech, recovered = await asyncio.gather(
+            self._freeleech_status(),
+            db.recently_recovered_hashes(RECENTLY_RECOVERED_DAYS),
+        )
+
+        active_tags = {self.cfg.recovery.escalation_tag, self.cfg.recovery.working_tag}
+        out: dict[str, list[dict[str, Any]]] = {}
+        for torrent in torrents:
+            if not torrent.is_complete or torrent.is_paused:
+                continue
+            plugin = self.router.for_hosts(torrent.tracker_hosts)
+            if plugin is None:
+                continue
+
+            fl_entry = freeleech.get(plugin.id, {}).get(normalise_release(torrent.name))
+            recently_recovered = torrent.infohash in recovered and not (
+                active_tags & set(torrent.tags)
+            )
+            out.setdefault(plugin.id, []).append(
+                {
+                    "infohash": torrent.infohash,
+                    "name": torrent.name,
+                    "tracker": plugin.id,
+                    "tracker_name": plugin.name,
+                    "ratio": round(torrent.ratio, 3),
+                    "uploaded": torrent.uploaded,
+                    "seeding_time": torrent.seeding_time,
+                    "tags": torrent.tags,
+                    "freeleech": fl_entry.freeleech if fl_entry else None,
+                    "recently_recovered": recently_recovered,
+                }
+            )
+        return {"trackers": out}
 
     async def _local_seed_counts(self) -> dict[str, int]:
         """How many torrents we are actually seeding, per tracker."""

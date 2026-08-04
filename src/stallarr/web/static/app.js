@@ -18,6 +18,10 @@ const state = {
   issues: [],
   selected: new Set(),
   page: 0,
+  // Same caching rationale as torrents: filtering/paging the Seeding tab
+  // should not cost a round trip.
+  seeding: [],
+  seedingPage: 0,
 };
 
 // --- helpers ----------------------------------------------------------------
@@ -63,6 +67,16 @@ const ago = (ts) => {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
+};
+
+const duration = (s) => {
+  if (!s) return '—';
+  const days = Math.floor(s / 86400);
+  const hours = Math.floor((s % 86400) / 3600);
+  if (days) return `${days}d ${hours}h`;
+  const minutes = Math.floor((s % 3600) / 60);
+  if (hours) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
 };
 
 const label = (text) => String(text).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -156,6 +170,7 @@ async function refresh() {
     if (state.activeTab === 'deletions') await loadDeletions();
     if (state.activeTab === 'logs') await loadLogs();
     if (state.activeTab === 'trackers') { renderPlugins(status); await loadTrackerStats(); }
+    if (state.activeTab === 'seeding') await loadSeeding();
   } catch (err) {
     if (err.message !== 'authentication required') toast(err.message, 'bad');
   }
@@ -616,6 +631,111 @@ $$('[data-bulk]').forEach((btn) => btn.addEventListener('click', async () => {
 });
 $('#page-prev').addEventListener('click', () => { state.page -= 1; renderTorrents(); });
 $('#page-next').addEventListener('click', () => { state.page += 1; renderTorrents(); });
+
+// --- seeding ------------------------------------------------------------------
+
+const SEEDING_SORTS = {
+  tracker: (a, b) =>
+    (a.tracker_name || a.tracker).localeCompare(b.tracker_name || b.tracker)
+      || a.name.localeCompare(b.name),
+  name: (a, b) => a.name.localeCompare(b.name),
+  ratio: (a, b) => a.ratio - b.ratio,
+  uploaded: (a, b) => b.uploaded - a.uploaded,
+  seeding_time: (a, b) => b.seeding_time - a.seeding_time,
+};
+
+/** Fetch, then render from the cache — same split as loadTorrents, so the
+ *  refresh timer doesn't cost a round trip while you're filtering. */
+async function loadSeeding() {
+  const data = await api('/seeding');
+  state.seeding = Object.values(data.trackers || {}).flat();
+  refreshSeedingFilterOptions(state.seeding);
+  renderSeeding();
+}
+
+function refreshSeedingFilterOptions(rows) {
+  const trackers = [...new Set(rows.map((r) => r.tracker_name || r.tracker))]
+    .filter(Boolean).sort();
+  syncOptions($('#seeding-tracker'), trackers, 'all trackers');
+}
+
+function visibleSeeding() {
+  const needle = $('#seeding-search').value.trim().toLowerCase();
+  const tracker = $('#seeding-tracker').value;
+  return (state.seeding || []).filter((r) => {
+    if (needle && !r.name.toLowerCase().includes(needle)) return false;
+    if (tracker && (r.tracker_name || r.tracker) !== tracker) return false;
+    return true;
+  }).sort(SEEDING_SORTS[$('#seeding-sort').value] || SEEDING_SORTS.tracker);
+}
+
+function renderSeeding() {
+  const rows = visibleSeeding();
+  const pages = Math.max(Math.ceil(rows.length / PAGE_SIZE), 1);
+  state.seedingPage = Math.min(state.seedingPage, pages - 1);
+  const page = rows.slice(state.seedingPage * PAGE_SIZE, (state.seedingPage + 1) * PAGE_SIZE);
+  const body = $('#seeding-table tbody');
+
+  $('#seeding-count').textContent = rows.length === (state.seeding || []).length
+    ? `${rows.length} torrent(s)`
+    : `${rows.length} of ${(state.seeding || []).length} torrent(s)`;
+
+  $('#seeding-pager').hidden = pages < 2;
+  $('#seeding-page-label').textContent = `page ${state.seedingPage + 1} of ${pages}`;
+  $('#seeding-page-prev').disabled = state.seedingPage === 0;
+  $('#seeding-page-next').disabled = state.seedingPage >= pages - 1;
+
+  if (!page.length) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">Nothing is actively seeding.</td></tr>';
+    return;
+  }
+
+  // A sub-header row per tracker, inserted whenever it changes — only
+  // meaningful under the default tracker sort, since any other sort
+  // interleaves trackers and a group heading would misdescribe its rows.
+  const grouped = ($('#seeding-sort').value || 'tracker') === 'tracker';
+  const html = [];
+  let lastTracker = null;
+  for (const r of page) {
+    if (grouped && r.tracker !== lastTracker) {
+      lastTracker = r.tracker;
+      html.push(`<tr class="group-row"><td colspan="7">${esc(r.tracker_name || r.tracker)}</td></tr>`);
+    }
+    html.push(seedingRow(r));
+  }
+  body.innerHTML = html.join('');
+}
+
+function seedingRow(r) {
+  const tagPills = (r.tags || [])
+    .filter((t) => t.startsWith('stallarr:'))
+    .map((t) => `<span class="pill">${esc(label(t.replace('stallarr:', '')))}</span>`);
+  const notes = [
+    r.recently_recovered ? '<span class="pill ok">recovered</span>' : '',
+    ...tagPills,
+  ].filter(Boolean).join(' ') || '<span class="muted">—</span>';
+
+  const freeleech = r.freeleech === true ? '<span class="pill ok">freeleech</span>'
+    : r.freeleech === false ? '<span class="muted">no</span>'
+    : '<span class="muted">—</span>';
+
+  return `
+    <tr>
+      <td class="name">${esc(r.name)}</td>
+      <td><span class="pill">${esc(r.tracker_name || r.tracker)}</span></td>
+      <td>${r.ratio.toFixed(2)}</td>
+      <td>${bytes(r.uploaded)}</td>
+      <td>${duration(r.seeding_time)}</td>
+      <td>${freeleech}</td>
+      <td>${notes}</td>
+    </tr>`;
+}
+
+['#seeding-search', '#seeding-tracker', '#seeding-sort'].forEach((sel) => {
+  $(sel).addEventListener('input', () => { state.seedingPage = 0; renderSeeding(); });
+});
+$('#seeding-page-prev').addEventListener('click', () => { state.seedingPage -= 1; renderSeeding(); });
+$('#seeding-page-next').addEventListener('click', () => { state.seedingPage += 1; renderSeeding(); });
 
 // --- detail drawer ------------------------------------------------------------
 

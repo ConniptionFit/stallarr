@@ -143,6 +143,12 @@ td.name { max-width: 380px; word-break: break-word; }
 td.actions { white-space: nowrap; }
 .empty { text-align: center; color: var(--muted); padding: 26px; }
 
+.group-row td {
+  padding: 6px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+  color: var(--muted); background: rgba(255,255,255,.03); border-bottom: 1px solid var(--glass-border);
+}
+.group-row:hover { background: rgba(255,255,255,.03); }
+
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
 .dot.ok { background: var(--ok); }
 .dot.info { background: var(--info); }

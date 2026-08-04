@@ -256,6 +256,82 @@ async def test_unparseable_sizes_become_none_rather_than_wrong_numbers():
     assert (await _stats_from({"uploaded": "lots"})).uploaded is None
 
 
+# --- UNIT3D freeleech status --------------------------------------------------
+# Opt-in and best-effort: the "my uploads" filter param and the freeleech
+# field name both vary across UNIT3D forks and are unverified against a live
+# instance, hence the off-by-default gate and the overridable field name.
+
+
+def _freeleech_plugin(**options):
+    return Unit3dPlugin(
+        TrackerConfig(
+            enabled=True,
+            url="https://x.test",
+            api_key="tok",
+            options={"freeleech_enabled": True, "freeleech_username": "me", **options},
+        )
+    )
+
+
+async def _freeleech_from(payload, **options):
+    plugin = _freeleech_plugin(**options)
+    plugin.get = lambda *a, **k: _async(_StubResponse(payload))
+    return await plugin.freeleech_status()
+
+
+def test_freeleech_capability_is_off_by_default():
+    plugin = Unit3dPlugin(TrackerConfig(enabled=True, api_key="tok"))
+    assert Capability.FREELEECH_STATUS not in plugin.capabilities
+
+
+def test_freeleech_capability_requires_opting_in():
+    plugin = _freeleech_plugin()
+    assert Capability.FREELEECH_STATUS in plugin.capabilities
+
+
+async def test_freeleech_status_needs_a_username():
+    """No username configured means no lookup, not a request with an empty
+    filter — that would return every torrent on the site, not just ours."""
+    plugin = Unit3dPlugin(
+        TrackerConfig(enabled=True, api_key="tok", options={"freeleech_enabled": True})
+    )
+    plugin.get = lambda *a, **k: _async(_StubResponse({"data": []}))
+    assert await plugin.freeleech_status() == []
+
+
+async def test_freeleech_status_is_parsed_from_the_default_field():
+    payload = {
+        "data": [
+            {"id": "1", "name": "Some.Release-GRP", "free": True},
+            {"id": "2", "name": "Other.Release-GRP", "free": False},
+        ]
+    }
+    entries = await _freeleech_from(payload)
+
+    assert {e.name: e.freeleech for e in entries} == {
+        "Some.Release-GRP": True,
+        "Other.Release-GRP": False,
+    }
+
+
+async def test_freeleech_field_name_is_overridable():
+    """Forks spell this differently; getting the field wrong must read as
+    unknown, not silently as False (see `_as_bool`)."""
+    payload = {"data": [{"id": "1", "name": "Some.Release-GRP", "download_multiplier": 0}]}
+
+    entries = await _freeleech_from(payload, freeleech_field="download_multiplier")
+
+    assert entries[0].freeleech is False
+
+
+async def test_an_unrecognised_freeleech_field_reports_unknown_not_false():
+    payload = {"data": [{"id": "1", "name": "Some.Release-GRP"}]}
+
+    entries = await _freeleech_from(payload)
+
+    assert entries[0].freeleech is None
+
+
 # --- cookie assembly ---------------------------------------------------------
 # The UI collects uid and pass separately because that is how a browser's
 # storage inspector shows them. Getting the header wrong here fails silently:

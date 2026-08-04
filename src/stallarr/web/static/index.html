@@ -47,6 +47,7 @@
     <button class="tab" data-tab="history">History</button>
     <button class="tab" data-tab="deletions">Deleted</button>
     <button class="tab" data-tab="trackers">Trackers</button>
+    <button class="tab" data-tab="seeding">Seeding</button>
     <button class="tab" data-tab="settings">Settings</button>
     <button class="tab" data-tab="logs">Logs</button>
   </nav>
@@ -287,6 +288,45 @@
           <span class="muted">Tracker totals, checked against what you are actually seeding.</span>
         </div>
         <div id="tracker-stats" class="muted">Loading…</div>
+      </div>
+    </section>
+
+    <!-- Seeding -->
+    <section class="panel" id="tab-seeding">
+      <div class="glass card">
+        <div class="card-head">
+          <h2>Actively seeding</h2>
+          <span class="muted" id="seeding-count"></span>
+        </div>
+
+        <div class="filters torrent-filters">
+          <input type="search" id="seeding-search" placeholder="Search name…" autocomplete="off">
+          <select id="seeding-tracker"><option value="">all trackers</option></select>
+          <select id="seeding-sort">
+            <option value="tracker">tracker</option>
+            <option value="name">name</option>
+            <option value="ratio">lowest ratio</option>
+            <option value="uploaded">most uploaded</option>
+            <option value="seeding_time">longest seeding</option>
+          </select>
+        </div>
+
+        <div class="table-wrap">
+          <table id="seeding-table">
+            <thead>
+              <tr>
+                <th>Name</th><th>Tracker</th><th>Ratio</th><th>Uploaded</th>
+                <th>Seeding for</th><th>Freeleech</th><th>Notes</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card-foot pager" id="seeding-pager" hidden>
+          <button class="tiny ghost" id="seeding-page-prev">Previous</button>
+          <span class="muted" id="seeding-page-label"></span>
+          <button class="tiny ghost" id="seeding-page-next">Next</button>
+        </div>
       </div>
     </section>
 

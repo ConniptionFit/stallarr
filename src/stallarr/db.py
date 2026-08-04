@@ -322,6 +322,21 @@ async def get_history(
     )
 
 
+async def recently_recovered_hashes(days: int = 7) -> set[str]:
+    """Infohashes with a successful action in the last `days`.
+
+    One query rather than `get_history` per torrent — this is meant to be
+    called once per dashboard request and checked against a whole library.
+    """
+    cutoff = int(time.time()) - max(days, 0) * 86400
+    rows = await asyncio.to_thread(
+        _rows,
+        "SELECT DISTINCT infohash FROM history WHERE ok = 1 AND ts >= ?",
+        (cutoff,),
+    )
+    return {row["infohash"] for row in rows}
+
+
 async def prune_history(retention_days: int) -> None:
     cutoff = int(time.time()) - retention_days * 86400
     await asyncio.to_thread(_exec, "DELETE FROM history WHERE ts < ?", (cutoff,))

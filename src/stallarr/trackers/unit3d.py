@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..models import TrackerHealth, TrackerTorrentInfo, UserStats
+from ..models import TrackerFreeleechEntry, TrackerHealth, TrackerTorrentInfo, UserStats
 from ..utils import looks_like_torrent
 from .base import Capability, TrackerError, TrackerPlugin
 
@@ -37,14 +37,20 @@ log = logging.getLogger(__name__)
 class Unit3dPlugin(TrackerPlugin):
     """Base class for UNIT3D sites. Subclasses normally only set class attrs."""
 
-    capabilities = frozenset(
-        {
+    @property
+    def capabilities(self) -> frozenset[Capability]:  # type: ignore[override]
+        base = {
             Capability.ANNOUNCE_URL,
             Capability.TORRENT_FILE,
             Capability.TORRENT_INFO,
             Capability.USER_STATS,
         }
-    )
+        # Opt-in only: the "my uploads" filter param and the freeleech field
+        # name both vary across UNIT3D forks and are unverified here. See
+        # freeleech_status() for what options.freeleech_enabled requires.
+        if self.option("freeleech_enabled", False):
+            base.add(Capability.FREELEECH_STATUS)
+        return frozenset(base)
 
     #: UNIT3D's account endpoint. Stock across deployments; override per site
     #: with `"options": {"user_stats_path": "..."}` if one has moved it.
@@ -208,6 +214,46 @@ class Unit3dPlugin(TrackerPlugin):
             raw=record,
         )
 
+    async def freeleech_status(self) -> list[TrackerFreeleechEntry]:
+        """Our own torrents, with freeleech status where the site reports it.
+
+        Opt-in via `options.freeleech_enabled` — off by default. Two things
+        here are unverified against a live UNIT3D instance and vary across
+        forks: the "my uploads" filter param (default `uploader`, override
+        with `options.freeleech_uploader_param`) and the freeleech attribute's
+        field name (default `free`, override with `options.freeleech_field`).
+        Check both against the tracker's own UI before trusting this — a wrong
+        field name reads as "nothing is freeleech" rather than erroring, since
+        `_as_bool` treats an absent/unknown field as `None`, not `False`.
+        """
+        if not self.option("freeleech_enabled", False):
+            return []
+        username = self.option("freeleech_username", "")
+        if not username or not self.cfg.api_key:
+            return []
+
+        path = self.option("filter_path", "/api/torrents/filter")
+        param = self.option("freeleech_uploader_param", "uploader")
+        resp = await self.get(path, params={param: username, "perPage": 100})
+        if resp.status_code >= 400:
+            raise TrackerError(f"{self.id}: freeleech lookup returned HTTP {resp.status_code}")
+
+        field = self.option("freeleech_field", "free")
+        out = []
+        for record in self._attributes(self._json(resp)):
+            name = record.get("name")
+            if not name:
+                continue
+            out.append(
+                TrackerFreeleechEntry(
+                    name=name,
+                    torrent_id=str(record.get("id")) if record.get("id") is not None else None,
+                    freeleech=_as_bool(record.get(field)),
+                    raw=record,
+                )
+            )
+        return out
+
 
 def _first(record: dict, *keys: str) -> Any:
     """First key that is actually present, spelling variants in preference order.
@@ -218,6 +264,26 @@ def _first(record: dict, *keys: str) -> Any:
     for key in keys:
         if record.get(key) is not None:
             return record[key]
+    return None
+
+
+def _as_bool(value: Any) -> bool | None:
+    """`None` when the field is missing/unrecognised, never a guessed default.
+
+    A `freeleech_field` override that names the wrong field on some fork
+    should read as "unknown" for every torrent, not silently as "not
+    freeleech" — the latter looks configured and correct while being wrong.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "yes", "1"):
+            return True
+        if low in ("false", "no", "0", ""):
+            return False
     return None
 
 

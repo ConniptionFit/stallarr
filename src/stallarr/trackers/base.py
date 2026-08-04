@@ -24,7 +24,13 @@ from typing import Any
 import httpx
 
 from ..config import TrackerConfig
-from ..models import SeedingRequirement, TrackerHealth, TrackerTorrentInfo, UserStats
+from ..models import (
+    SeedingRequirement,
+    TrackerFreeleechEntry,
+    TrackerHealth,
+    TrackerTorrentInfo,
+    UserStats,
+)
 from ..utils import normalise_host, redact_secrets
 
 log = logging.getLogger(__name__)
@@ -52,6 +58,8 @@ class Capability(StrEnum):
     HNR = "hnr"
     #: list the torrents the site says we still owe seeding on
     SEEDING_REQUIREMENTS = "seeding_requirements"
+    #: list our own torrents with their freeleech status
+    FREELEECH_STATUS = "freeleech_status"
 
 
 #: Tracker messages that mean "this torrent is gone, stop retrying".
@@ -268,6 +276,15 @@ class TrackerPlugin:
         One call per tracker per scan, not one per torrent — that is what makes
         this affordable where per-torrent enrichment is not. Return `[]` when
         the site has no such page; never raise for "nothing owed".
+        """
+        return []
+
+    async def freeleech_status(self) -> list[TrackerFreeleechEntry]:
+        """Our own torrents on this site, with freeleech status where known.
+
+        One call per tracker per scan, same budget as `seeding_requirements`.
+        Return `[]` when the site has no such listing or nothing to report;
+        never raise for "nothing here".
         """
         return []
 

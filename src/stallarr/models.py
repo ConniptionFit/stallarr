@@ -364,6 +364,21 @@ class TrackerTorrentInfo:
 
 
 @dataclass(slots=True)
+class TrackerFreeleechEntry:
+    """One row from a tracker's bulk "my torrents" listing, for freeleech status.
+
+    Best-effort: sites vary in what they expose here, so only `freeleech` is
+    load-bearing. `name` is matched against the client by
+    `utils.normalise_release`, same as `SeedingRequirement`.
+    """
+
+    name: str
+    torrent_id: str | None = None
+    freeleech: bool | None = None
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class TrackerHealth:
     ok: bool
     detail: str = ""

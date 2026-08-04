@@ -296,6 +296,10 @@ def build_router() -> APIRouter:
     async def tracker_stats(request: Request) -> dict:
         return await _service(request).tracker_stats()
 
+    @router.get("/seeding", dependencies=guarded)
+    async def seeding_view(request: Request) -> dict:
+        return await _service(request).seeding_view()
+
     # --- actions --------------------------------------------------------------
 
     @router.post("/scan", dependencies=guarded)

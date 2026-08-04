@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import time
 
 from stallarr import db
 
@@ -120,3 +121,41 @@ async def test_an_unknown_action_matches_nothing_rather_than_everything():
     await _seed_history()
 
     assert await db.get_history(action="not_a_real_action") == []
+
+
+# --- recently recovered --------------------------------------------------------
+
+
+async def _insert_history_at(infohash: str, ts: int, *, ok: bool = True) -> None:
+    """Bypass `add_history`'s `int(time.time())` stamp to control the row's age."""
+    await asyncio.to_thread(
+        db._exec,
+        """INSERT INTO history (ts, infohash, name, tracker, ailment, action, ok, dry_run, message)
+           VALUES (?, ?, '', '', '', 'reannounce', ?, 0, '')""",
+        (ts, infohash, 1 if ok else 0),
+    )
+
+
+async def test_recently_recovered_respects_the_window():
+    await db.init()
+    await asyncio.to_thread(db._exec, "DELETE FROM history", ())
+    now = int(time.time())
+    await _insert_history_at("recentwin" + "0" * 31, now - 3600)  # 1h ago: in
+    await _insert_history_at("recentwin" + "1" * 31, now - 30 * 86400)  # 30d ago: out
+
+    hashes = await db.recently_recovered_hashes(days=7)
+
+    assert "recentwin" + "0" * 31 in hashes
+    assert "recentwin" + "1" * 31 not in hashes
+
+
+async def test_recently_recovered_excludes_failed_actions():
+    """`ok=0` rows must not count as a recovery — same bug class as
+    `test_ok_false_is_not_confused_with_no_filter` above, for a query that
+    filters `ok` in SQL rather than through `get_history`."""
+    await db.init()
+    await asyncio.to_thread(db._exec, "DELETE FROM history", ())
+    now = int(time.time())
+    await _insert_history_at("recentfail" + "0" * 30, now - 60, ok=False)
+
+    assert "recentfail" + "0" * 30 not in await db.recently_recovered_hashes(days=7)
