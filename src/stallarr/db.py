@@ -136,7 +136,13 @@ CREATE TABLE IF NOT EXISTS scan_snapshots (
     actions   INTEGER NOT NULL DEFAULT 0,
     condemned INTEGER NOT NULL DEFAULT 0,
     owed      INTEGER NOT NULL DEFAULT 0,
-    duration  REAL NOT NULL DEFAULT 0
+    duration  REAL NOT NULL DEFAULT 0,
+    uploaded  INTEGER NOT NULL DEFAULT 0,
+    downloaded INTEGER NOT NULL DEFAULT 0,
+    upspeed   INTEGER NOT NULL DEFAULT 0,
+    seeding   INTEGER NOT NULL DEFAULT 0,
+    uploading INTEGER NOT NULL DEFAULT 0,
+    recovered INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON scan_snapshots (ts DESC);
 """
@@ -146,6 +152,17 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON scan_snapshots (ts DESC);
 #: their own idempotent step or they only ever exist on fresh installs.
 _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("condemned", "size", "INTEGER NOT NULL DEFAULT 0"),
+    # Library totals, so the trend can show upload earned per day rather than
+    # only counts of problems.
+    ("scan_snapshots", "uploaded", "INTEGER NOT NULL DEFAULT 0"),
+    ("scan_snapshots", "downloaded", "INTEGER NOT NULL DEFAULT 0"),
+    ("scan_snapshots", "upspeed", "INTEGER NOT NULL DEFAULT 0"),
+    ("scan_snapshots", "seeding", "INTEGER NOT NULL DEFAULT 0"),
+    ("scan_snapshots", "uploading", "INTEGER NOT NULL DEFAULT 0"),
+    # Torrents that came back healthy on that scan. No history row records a
+    # recovery (it is the absence of a problem), so this is the only place the
+    # count survives.
+    ("scan_snapshots", "recovered", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -335,6 +352,70 @@ async def recently_recovered_hashes(days: int = 7) -> set[str]:
         (cutoff,),
     )
     return {row["infohash"] for row in rows}
+
+
+def _repair_stats_sync(days: int) -> dict[str, Any]:
+    cutoff = int(time.time()) - max(days, 0) * 86400
+    with _connect() as conn:
+        by_action = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT action,
+                          COUNT(*)              AS attempts,
+                          SUM(ok = 1)           AS succeeded,
+                          SUM(ok = 0)           AS failed,
+                          COUNT(DISTINCT infohash) AS torrents
+                     FROM history
+                    WHERE ts >= ? AND dry_run = 0
+                    GROUP BY action
+                    ORDER BY attempts DESC, action""",
+                (cutoff,),
+            ).fetchall()
+        ]
+        totals = conn.execute(
+            """SELECT COUNT(*)                                     AS attempts,
+                      COALESCE(SUM(ok = 1), 0)                     AS succeeded,
+                      COALESCE(SUM(ok = 0), 0)                     AS failed,
+                      COUNT(DISTINCT infohash)                     AS torrents
+                 FROM history
+                WHERE ts >= ? AND dry_run = 0""",
+            (cutoff,),
+        ).fetchone()
+        dry = conn.execute(
+            "SELECT COUNT(*) AS n FROM history WHERE ts >= ? AND dry_run = 1", (cutoff,)
+        ).fetchone()
+        recovered = conn.execute(
+            "SELECT COALESCE(SUM(recovered), 0) AS n FROM scan_snapshots WHERE ts >= ?",
+            (cutoff,),
+        ).fetchone()
+
+    attempts = int(totals["attempts"] or 0)
+    succeeded = int(totals["succeeded"] or 0)
+    for row in by_action:
+        row["success_rate"] = round(row["succeeded"] / row["attempts"], 3) if row["attempts"] else None
+    return {
+        "window_days": days,
+        "attempts": attempts,
+        "succeeded": succeeded,
+        "failed": int(totals["failed"] or 0),
+        "torrents": int(totals["torrents"] or 0),
+        "success_rate": round(succeeded / attempts, 3) if attempts else None,
+        "dry_run": int(dry["n"] or 0),
+        "recovered": int(recovered["n"] or 0),
+        "by_action": by_action,
+    }
+
+
+async def repair_stats(days: int = 7) -> dict[str, Any]:
+    """What the recovery engine did over the window, and how often it worked.
+
+    "Succeeded" means the client accepted the action, not that the torrent
+    recovered: a reannounce that lands still leaves a dead swarm dead. The
+    separate `recovered` figure (torrents that came back healthy, summed from
+    scan snapshots) is the outcome; the success rate is only the mechanics.
+    Dry runs are counted apart because they changed nothing.
+    """
+    return await asyncio.to_thread(_repair_stats_sync, days)
 
 
 async def prune_history(retention_days: int) -> None:
@@ -527,35 +608,60 @@ async def deletion_totals(days: int = 7) -> dict[str, Any]:
 # --- scan snapshots -----------------------------------------------------------
 
 
+#: Integer columns of `scan_snapshots`, other than its `ts` key. One list so the
+#: insert cannot drift out of step with the schema.
+_SNAPSHOT_INTS = (
+    "total",
+    "healthy",
+    "sick",
+    "skipped",
+    "actions",
+    "condemned",
+    "owed",
+    "uploaded",
+    "downloaded",
+    "upspeed",
+    "seeding",
+    "uploading",
+    "recovered",
+)
+
+
 async def record_snapshot(**fields: Any) -> None:
     """One row per finished scan. Keyed by second, so a re-run replaces."""
     await asyncio.to_thread(
         _exec,
-        """INSERT OR REPLACE INTO scan_snapshots
-           (ts, total, healthy, sick, skipped, actions, condemned, owed, duration)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        f"""INSERT OR REPLACE INTO scan_snapshots
+           (ts, {", ".join(_SNAPSHOT_INTS)}, duration)
+           VALUES (?, {", ".join("?" for _ in _SNAPSHOT_INTS)}, ?)""",
         (
             int(fields.get("ts") or time.time()),
-            int(fields.get("total") or 0),
-            int(fields.get("healthy") or 0),
-            int(fields.get("sick") or 0),
-            int(fields.get("skipped") or 0),
-            int(fields.get("actions") or 0),
-            int(fields.get("condemned") or 0),
-            int(fields.get("owed") or 0),
+            *(int(fields.get(col) or 0) for col in _SNAPSHOT_INTS),
             float(fields.get("duration") or 0.0),
         ),
     )
 
 
 async def scan_history(days: int = 7, limit: int = 500) -> list[dict[str, Any]]:
+    """Snapshots in the window, oldest first, thinned to at most `limit`.
+
+    Thinned evenly across the window rather than cut at the newest `limit`: a
+    30-day view at a 15-minute interval is ~2900 rows, and keeping only the
+    latest 500 would silently turn "30 days" into "the last five". The first
+    and last rows always survive, so a change measured end to end is exact.
+    """
     cutoff = int(time.time()) - max(days, 0) * 86400
     rows = await asyncio.to_thread(
         _rows,
-        "SELECT * FROM scan_snapshots WHERE ts >= ? ORDER BY ts DESC LIMIT ?",
-        (cutoff, limit),
+        "SELECT * FROM scan_snapshots WHERE ts >= ? ORDER BY ts ASC",
+        (cutoff,),
     )
-    return list(reversed(rows))
+    if limit <= 0 or len(rows) <= limit:
+        return rows
+    if limit == 1:
+        return rows[-1:]
+    step = (len(rows) - 1) / (limit - 1)
+    return [rows[round(i * step)] for i in range(limit)]
 
 
 async def prune_snapshots(retention_days: int) -> None:

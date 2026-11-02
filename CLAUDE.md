@@ -97,6 +97,17 @@ their own column rather than folded in. Three rules hold that number up:
     (`_record_obligations_sync`), so last month's repair cannot be credited with
     this month's debt.
 
+**Dashboard statistics keep four distinctions apart, and the labels promise them.**
+`stats.py` computes library totals from the torrent list the scan already
+fetched, so no stat costs a tracker call. Keep these separate when adding one:
+*seeding* (complete, not stopped) vs *uploading* (sending data now); *client
+ratio* (torrents in qBittorrent today) vs *account ratio* (the site's figure,
+Trackers tab); a repair step *accepted* (`db.repair_stats`, dry runs excluded)
+vs a torrent *recovered* (`ScanSummary.recovered`, summed from snapshots, since
+no history row records a recovery); and *problems by type* counts each torrent
+once under its primary finding so it adds up to the Problems tile. Every tile
+states its time frame and carries a hover hint saying exactly what it counts.
+
 **A client share limit stops a torrent and looks exactly like a pause.**
 qBittorrent enforces per-torrent ratio and seeding-time caps by stopping the
 torrent, with no distinct state: a capped torrent and a hand-paused one are both
