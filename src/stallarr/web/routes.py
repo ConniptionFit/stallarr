@@ -367,7 +367,10 @@ def build_router() -> APIRouter:
 
     @router.get("/snapshots", dependencies=guarded)
     async def snapshots(days: int = 7) -> dict:
-        return {"snapshots": await db.scan_history(days)}
+        # Clamped: the dashboard offers 1, 7 and 30, and an unbounded value is
+        # a full-table read on every refresh.
+        days = min(max(days, 1), 90)
+        return {"days": days, "snapshots": await db.scan_history(days)}
 
     @router.post("/notify/test", dependencies=guarded)
     async def notify_test(request: Request) -> dict:

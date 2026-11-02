@@ -22,6 +22,7 @@ const state = {
   // should not cost a round trip.
   seeding: [],
   seedingPage: 0,
+  trendDays: 7,
 };
 
 // --- helpers ----------------------------------------------------------------
@@ -79,7 +80,38 @@ const duration = (s) => {
   return `${minutes}m`;
 };
 
-const label = (text) => String(text).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+/** Plain-language names for ailments and repair steps. The enum values are
+ *  stable identifiers, not prose: "Stalled Upload" says less than "Seeding but
+ *  not uploading", and "Toggle" says nothing at all. Anything not listed falls
+ *  back to title-casing the identifier. */
+const FRIENDLY = {
+  unregistered: 'Deleted on tracker',
+  tracker_down: 'Tracker unreachable',
+  tracker_auth: 'Tracker rejected passkey',
+  not_announcing: 'Not announcing',
+  stalled_download: 'Download stalled',
+  stalled_upload: 'Seeding, not uploading',
+  missing_files: 'Files missing',
+  client_error: 'Client error',
+  unexpectedly_paused: 'Stopped unexpectedly',
+  hit_and_run_risk: 'Hit-and-run risk',
+  resume: 'Resume',
+  lift_share_limits: 'Lift share limits',
+  reannounce: 'Reannounce',
+  refresh_announce: 'Refresh announce URL',
+  recheck: 'Recheck files',
+  toggle: 'Stop and restart',
+  replace_torrent: 'Replace .torrent',
+  redownload: 'Re-download',
+  delete: 'Delete',
+};
+
+const label = (text) => FRIENDLY[text]
+  || String(text).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+const pct = (fraction) => (fraction == null ? '—' : `${Math.round(fraction * 100)}%`);
+const rate = (n) => `${bytes(n)}/s`;
+const ratioText = (r) => (r == null ? '—' : r.toFixed(2));
 
 // --- auth -------------------------------------------------------------------
 
@@ -157,6 +189,9 @@ async function refresh() {
     const status = await api('/status');
     state.issues = status.issues || [];
     renderStats(status);
+    renderProblems(status);
+    renderRepairs(status.repairs || {});
+    renderLibrary(status.library || {});
     renderIssues(state.issues);
     $('#dry-run-pill').hidden = !status.recovery.dry_run;
     renderSeedingMetrics(status.seeding || {});
@@ -262,41 +297,78 @@ function renderCondemned(rows) {
 }
 
 /** Small inline sparklines. No chart library: these are polylines over a fixed
- *  viewBox, and pulling in a dependency for that would be the tail wagging. */
+ *  viewBox, and pulling in a dependency for that would be the tail wagging.
+ *
+ *  Each series says what its headline number means. Counts show the latest
+ *  value and the change across the window; "Uploaded" and "Recovered" are
+ *  totals *earned within* the window, which is the figure someone watching
+ *  their ratio actually wants. */
 async function loadTrend() {
+  const days = state.trendDays;
   let snapshots = [];
-  try { ({ snapshots } = await api('/snapshots?days=7')); } catch { return; }
+  try { ({ snapshots } = await api(`/snapshots?days=${days}`)); } catch { return; }
 
   $('#trend-card').hidden = snapshots.length < 2;
   if (snapshots.length < 2) return;
 
-  $('#trend-meta').textContent =
-    `${snapshots.length} scans · ${ago(snapshots[0].ts)} to now`;
+  const window_ = days === 1 ? '24h' : `${days}d`;
+  $('#trend-meta').textContent = `${snapshots.length} scans · ${ago(snapshots[0].ts)} to now`;
+
+  // Upload earned per scan interval. Library totals fall when a torrent is
+  // removed, so only increases count; a row from before these columns existed
+  // reads 0 and must not turn the whole library into "uploaded this week".
+  const gains = snapshots.map((row, i) => {
+    if (!i) return 0;
+    const prev = snapshots[i - 1].uploaded || 0;
+    return prev > 0 ? Math.max((row.uploaded || 0) - prev, 0) : 0;
+  });
+  let running = 0;
+  const cumulative = gains.map((g) => (running += g));
 
   const series = [
-    { key: 'sick', label: 'Problems', cls: 'warn' },
-    { key: 'condemned', label: 'Queued for deletion', cls: 'crit' },
-    { key: 'owed', label: 'Seeding owed', cls: '' },
-    { key: 'total', label: 'Library size', cls: 'ok' },
+    {
+      label: 'Uploaded', cls: 'ok', values: cumulative,
+      value: bytes(running), sub: `earned in the last ${window_}`,
+    },
+    { key: 'seeding', label: 'Seeding', cls: 'ok', sub: 'complete and not stopped' },
+    { key: 'uploading', label: 'Uploading', cls: '', sub: 'sending data at scan time' },
+    { key: 'sick', label: 'Problems', cls: 'warn', sub: 'torrents with a finding' },
+    {
+      label: 'Recovered', cls: 'ok',
+      values: (() => { let n = 0; return snapshots.map((r) => (n += r.recovered || 0)); })(),
+      sub: `came back healthy in the last ${window_}`,
+    },
+    { key: 'owed', label: 'Seeding owed', cls: '', sub: 'listed by a tracker as owed' },
+    { key: 'condemned', label: 'Queued for deletion', cls: 'crit', sub: 'deleted on tracker, soaking' },
+    { key: 'total', label: 'Library size', cls: '', sub: 'torrents in the client' },
   ];
 
   $('#trend-charts').innerHTML = series.map((s) => {
-    const values = snapshots.map((row) => row[s.key] || 0);
+    const values = s.values || snapshots.map((row) => row[s.key] || 0);
     const last = values[values.length - 1];
-    const first = values[0];
-    const delta = last - first;
-    const arrow = delta === 0 ? '±0' : (delta > 0 ? `+${delta}` : `${delta}`);
+    let headline = s.value ?? last;
+    let sub = s.sub;
+    if (s.key) {
+      const delta = last - values[0];
+      sub += ` · ${delta === 0 ? 'no change' : (delta > 0 ? `+${delta}` : `${delta}`)} over ${window_}`;
+    }
     return `
       <div class="trend">
         <div class="trend-head">
           <span class="label">${esc(s.label)}</span>
-          <span class="value ${s.cls}">${last}</span>
-          <span class="muted sub">${arrow} over 7d</span>
+          <span class="value ${s.cls}">${esc(headline)}</span>
+          <span class="muted sub">${esc(sub)}</span>
         </div>
         ${sparkline(values)}
       </div>`;
   }).join('');
 }
+
+$$('#trend-window button').forEach((btn) => btn.addEventListener('click', () => {
+  state.trendDays = Number(btn.dataset.days);
+  $$('#trend-window button').forEach((b) => b.classList.toggle('active', b === btn));
+  loadTrend();
+}));
 
 function sparkline(values) {
   const width = 240;
@@ -324,75 +396,231 @@ function renderSeedingUnmatched(rows) {
     </tr>`).join('');
 }
 
+/** The headline tiles, grouped by the question each group answers.
+ *
+ *  Every tile carries a `hint` (shown on hover) saying exactly what is
+ *  counted. The old single grid mixed "right now", "last scan", "last 7 days"
+ *  and "all time" figures side by side with nothing to tell them apart; each
+ *  group and sub-line now states its time frame. */
 function renderStats(status) {
   const scan = status.last_scan || {};
   const critical = (status.issues || []).filter((i) => i.severity >= 3).length;
   const trackers = Object.values(status.trackers || {});
   const trackersUp = trackers.filter((t) => t.ok).length;
   const seeding = status.seeding || {};
+  const lib = status.library || {};
+  const repairs = status.repairs || {};
+  const days = seeding.window_days ?? repairs.window_days ?? 7;
+  const condemned = (status.condemned || []).length;
+  const blocks = (status.deletion_blocks || []).length;
+  const deletions = status.deletions || {};
+  const watched = (scan.total ?? 0) - (scan.skipped ?? 0);
 
-  const cards = [
-    { label: 'Torrents', value: scan.total ?? 0, sub: `${scan.skipped ?? 0} skipped` },
-    { label: 'Healthy', value: scan.healthy ?? 0, cls: 'ok', sub: 'passing all checks' },
-    { label: 'Problems', value: scan.sick ?? 0, cls: scan.sick ? 'warn' : 'ok', sub: `${critical} critical` },
-    { label: 'Repairs', value: scan.actions ?? 0, sub: 'last scan' },
+  const groups = [
     {
-      label: 'Seeding owed',
-      value: seeding.outstanding ?? 0,
-      cls: seeding.outstanding ? 'warn' : 'ok',
-      sub: seeding.outstanding
-        ? `${seeding.working ?? 0} being repaired`
-        : `${seeding.seen ?? 0} seen in ${seeding.window_days ?? 7}d`,
+      title: 'Upload & ratio', note: 'torrents in your client right now',
+      cards: [
+        {
+          label: 'Uploaded', value: bytes(lib.uploaded || 0), cls: 'ok',
+          sub: `↓ ${bytes(lib.downloaded || 0)} downloaded`,
+          hint: 'Total uploaded by the torrents currently in qBittorrent. Removed torrents no longer count, so this is lower than your tracker account totals.',
+        },
+        {
+          label: 'Client ratio', value: ratioText(lib.ratio),
+          cls: lib.ratio == null ? '' : lib.ratio >= 1 ? 'ok' : 'warn',
+          sub: 'uploaded ÷ downloaded',
+          hint: 'Uploaded divided by downloaded across the torrents in your client. Not your account ratio on any site; see the Trackers tab for those.',
+        },
+        {
+          label: 'Upload speed', value: rate(lib.upspeed || 0),
+          sub: `↓ ${rate(lib.dlspeed || 0)} at last scan`,
+          hint: 'Combined upload speed of every torrent, measured when the last scan ran.',
+        },
+        {
+          label: 'Uploading now', value: `${lib.uploading ?? 0}`,
+          cls: lib.uploading ? 'ok' : '',
+          sub: `of ${lib.seeding ?? 0} seeding`,
+          hint: 'Seeding torrents that were sending data at the last scan. Idle seeds are normal: nobody is downloading them right now.',
+        },
+      ],
     },
     {
-      label: 'H&R averted',  // escaped on render — do not pre-encode
-      value: seeding.averted ?? 0,
-      cls: seeding.averted ? 'ok' : '',
-      sub: `cleared after a repair · last ${seeding.window_days ?? 7}d`,
+      title: 'Health', note: 'last scan',
+      cards: [
+        {
+          label: 'Checked', value: watched,
+          sub: scan.skipped ? `${scan.skipped} skipped by your filters` : `of ${scan.total ?? 0} in client`,
+          hint: 'Torrents stallarr diagnosed on the last scan. Skipped ones are ignored, in an excluded category or tag, queued, or busy checking/moving.',
+        },
+        {
+          label: 'Healthy', value: scan.healthy ?? 0, cls: 'ok',
+          sub: watched ? `${pct((scan.healthy ?? 0) / watched)} of checked` : 'passing every check',
+          hint: 'Torrents with no findings at all.',
+        },
+        {
+          label: 'Problems', value: scan.sick ?? 0, cls: scan.sick ? 'warn' : 'ok',
+          sub: `${critical} critical`,
+          hint: 'Torrents with at least one finding. Critical means deleted on tracker, files missing, passkey rejected or hit-and-run risk.',
+        },
+        {
+          label: 'Recovered', value: repairs.recovered ?? 0, cls: repairs.recovered ? 'ok' : '',
+          sub: `came back healthy · ${days}d`,
+          hint: `Torrents that had a problem and then passed every check, over the last ${days} days. This is the outcome; repair counts below are only the attempts.`,
+        },
+      ],
     },
     {
-      label: 'Free space',
-      value: status.disk && status.disk.free != null ? bytes(status.disk.free) : '—',
-      sub: 'where the client writes',
+      title: 'Repairs', note: `last ${days} days`,
+      cards: [
+        {
+          label: 'Repairs tried', value: repairs.attempts ?? 0,
+          sub: `${scan.actions ?? 0} on the last scan · ${repairs.torrents ?? 0} torrents`,
+          hint: 'Recovery steps stallarr ran (resume, reannounce, recheck and so on). Dry runs are not counted.',
+        },
+        {
+          label: 'Accepted', value: pct(repairs.success_rate),
+          cls: repairs.success_rate == null ? '' : repairs.success_rate >= 0.8 ? 'ok' : 'warn',
+          sub: `${repairs.succeeded ?? 0} of ${repairs.attempts ?? 0} carried out`,
+          hint: 'Share of repair steps the client carried out without an error. A step can be accepted and still not fix the torrent.',
+        },
+        {
+          label: 'Failed', value: repairs.failed ?? 0, cls: repairs.failed ? 'warn' : 'ok',
+          sub: repairs.dry_run ? `${repairs.dry_run} dry-run step(s) not counted` : 'errored when run',
+          hint: 'Repair steps that returned an error. The History tab has the messages.',
+        },
+      ],
     },
     {
-      label: 'Reclaimed',
-      value: bytes((status.deletions || {}).reclaimed || 0),
-      sub: `${(status.deletions || {}).count || 0} deleted · all time`,
+      title: 'Hit-and-run protection', note: `last ${days} days`,
+      cards: [
+        {
+          label: 'Seeding owed', value: seeding.outstanding ?? 0,
+          cls: seeding.outstanding ? 'warn' : 'ok',
+          sub: seeding.outstanding
+            ? `${seeding.working ?? 0} being repaired`
+            : `${seeding.seen ?? 0} seen in ${days}d`,
+          hint: 'Torrents a tracker currently lists as still owing seed time or ratio. Only sites that publish this list are counted.',
+        },
+        {
+          label: 'H&R averted', value: seeding.averted ?? 0, cls: seeding.averted ? 'ok' : '',
+          sub: `${seeding.self_cleared ?? 0} cleared on their own`,
+          hint: 'Obligations the tracker stopped listing after stallarr repaired the torrent. Ones that cleared with no repair are shown separately and not claimed.',
+        },
+      ],
     },
     {
-      label: 'Queued for deletion',
-      value: (status.condemned || []).length,
-      cls: (status.condemned || []).length ? 'warn' : 'ok',
-      sub: (status.deletion_blocks || []).length
-        ? `${(status.deletion_blocks || []).length} tracker(s) held back`
-        : 'awaiting the soak period',
+      title: 'Housekeeping', note: 'deletion and disk',
+      cards: [
+        {
+          label: 'Queued for deletion', value: condemned, cls: condemned ? 'warn' : 'ok',
+          sub: blocks ? `${blocks} tracker(s) held back` : 'awaiting the soak period',
+          hint: 'Torrents the tracker has deleted, waiting out the soak period before removal.',
+        },
+        {
+          label: 'Reclaimed', value: bytes(deletions.reclaimed || 0),
+          sub: `${deletions.count || 0} deleted · all time`,
+          hint: 'Disk space freed by deleting torrents together with their files, since stallarr was installed.',
+        },
+        {
+          label: 'Free space',
+          value: status.disk && status.disk.free != null ? bytes(status.disk.free) : '—',
+          sub: 'where the client writes',
+          hint: 'Free space on the client\'s default save path, as qBittorrent reports it.',
+        },
+      ],
     },
     {
-      label: 'Client',
-      value: status.client.connected ? 'Up' : 'Down',
-      cls: status.client.connected ? 'ok' : 'crit',
-      sub: esc(status.client.detail || ''),
-    },
-    {
-      label: 'Trackers',
-      value: `${trackersUp}/${trackers.length}`,
-      cls: trackers.length && trackersUp === trackers.length ? 'ok' : trackers.length ? 'warn' : '',
-      sub: 'plugins reachable',
-    },
-    {
-      label: 'Last scan',
-      value: status.scanning ? '…' : ago(scan.finished_at),
-      sub: `${scan.duration ?? 0}s · every ${status.scan_interval_minutes}m`,
+      title: 'System', note: '',
+      cards: [
+        {
+          label: 'Client',
+          value: status.client.connected ? 'Up' : 'Down',
+          cls: status.client.connected ? 'ok' : 'crit',
+          sub: status.client.detail || '',
+          hint: 'Whether qBittorrent answered on the last scan.',
+        },
+        {
+          label: 'Trackers',
+          value: `${trackersUp}/${trackers.length}`,
+          cls: trackers.length && trackersUp === trackers.length ? 'ok' : trackers.length ? 'warn' : '',
+          sub: 'site APIs reachable',
+          hint: 'Configured trackers whose API answered the last connection check.',
+        },
+        {
+          label: 'Last scan',
+          value: status.scanning ? '…' : ago(scan.finished_at),
+          sub: `took ${scan.duration ?? 0}s · every ${status.scan_interval_minutes}m`,
+          hint: 'When the last full scan finished, how long it took, and how often scans run.',
+        },
+      ],
     },
   ];
 
-  $('#stat-grid').innerHTML = cards.map((c) => `
-    <div class="stat ${c.cls || ''}">
-      <div class="value">${esc(c.value)}</div>
-      <div class="label">${esc(c.label)}</div>
-      <div class="sub">${c.sub}</div>
+  $('#stat-sections').innerHTML = groups.map((g) => `
+    <section class="stat-section">
+      <h3>${esc(g.title)}${g.note ? `<span class="muted">${esc(g.note)}</span>` : ''}</h3>
+      <div class="stat-grid">${g.cards.map((c) => `
+        <div class="stat ${c.cls || ''}"${c.hint ? ` title="${esc(c.hint)}"` : ''}>
+          <div class="value">${esc(c.value)}</div>
+          <div class="label">${esc(c.label)}</div>
+          <div class="sub">${esc(c.sub)}</div>
+        </div>`).join('')}
+      </div>
+    </section>`).join('');
+}
+
+/** One bar per problem type, worst-severity colour, primary finding only. */
+function renderProblems(status) {
+  const rows = status.problems_by_ailment || [];
+  const total = rows.reduce((n, r) => n + r.count, 0);
+  $('#problems-meta').textContent = total ? `${total} torrent(s)` : '';
+  if (!rows.length) {
+    $('#problems-bars').innerHTML = '<p class="muted">Nothing wrong on the last scan.</p>';
+    return;
+  }
+  const max = Math.max(...rows.map((r) => r.count));
+  $('#problems-bars').innerHTML = rows.map((r) => `
+    <div class="bar-row" title="${esc(r.ailment)}">
+      <span>${esc(label(r.ailment))}</span>
+      <span class="track"><span class="fill ${SEV[r.severity] || ''}" style="width:${(r.count / max) * 100}%"></span></span>
+      <span class="count">${r.count}</span>
     </div>`).join('');
+}
+
+/** Which repair steps ran, and how often the client carried them out. */
+function renderRepairs(repairs) {
+  const rows = repairs.by_action || [];
+  $('#repairs-meta').textContent = `last ${repairs.window_days ?? 7} days`;
+  $('#repairs-body').innerHTML = rows.length
+    ? rows.map((r) => `
+      <tr>
+        <td><span class="pill">${esc(label(r.action))}</span></td>
+        <td>${r.attempts}</td>
+        <td>${r.succeeded} <span class="muted">(${pct(r.success_rate)})</span></td>
+        <td>${r.failed ? `<strong>${r.failed}</strong>` : '<span class="muted">0</span>'}</td>
+        <td class="muted">${r.torrents}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="5" class="muted">No repairs in this window.</td></tr>';
+}
+
+/** Where upload is coming from, per tracker, from the client's own numbers. */
+function renderLibrary(lib) {
+  const rows = lib.by_tracker || [];
+  $('#library-card').hidden = !rows.length;
+  if (!rows.length) return;
+  const totalUp = lib.uploaded || 0;
+  $('#library-body').innerHTML = rows.map((r) => `
+    <tr>
+      <td><span class="pill">${esc(r.tracker_name || r.tracker)}</span></td>
+      <td>${r.torrents}</td>
+      <td>${r.seeding}${r.stopped ? ` <span class="muted">· ${r.stopped} stopped</span>` : ''}</td>
+      <td>${r.uploading ? `<strong>${r.uploading}</strong>` : '<span class="muted">0</span>'}</td>
+      <td>${bytes(r.uploaded)}</td>
+      <td class="muted">${bytes(r.downloaded)}</td>
+      <td>${ratioText(r.ratio)}</td>
+      <td class="muted">${rate(r.upspeed)}</td>
+      <td>${totalUp ? pct(r.uploaded / totalUp) : '—'}</td>
+    </tr>`).join('');
 }
 
 function renderIssues(issues) {
@@ -1085,6 +1313,11 @@ $('#save-trackers').addEventListener('click', async () => {
   setTimeout(() => { $('#trackers-saved').textContent = ''; }, 3000);
 });
 
+/** Per-site account numbers, as labelled rows rather than one dotted line.
+ *
+ *  Two kinds of figure sit on each card and are kept visibly apart: what the
+ *  *site* says about your account (above the rule) and what your *client* is
+ *  doing with that site's torrents (below it). */
 async function loadTrackerStats() {
   const stats = await api('/tracker-stats');
   const entries = Object.entries(stats);
@@ -1105,19 +1338,54 @@ async function loadTrackerStats() {
     // An account heading for trouble outranks announces that are not landing:
     // one is a threshold you set, the other is an inference.
     const cls = warnings.length ? 'crit' : unseen ? 'warn' : s.hit_and_runs ? 'crit' : 'ok';
-    const seeds = s.seeding != null
-      ? `${s.seeding} counted / ${s.local_seeding} local`
-      : `${s.local_seeding} seeding locally`;
-    const parts = [seeds];
-    if (s.uploaded != null) parts.push(`↑ ${bytes(s.uploaded)}`);
-    if (s.hit_and_runs != null) parts.push(`H&amp;R ${s.hit_and_runs}`);
-    if (unseen) parts.push(`<strong>${unseen} not announcing</strong>`);
+    const rows = [];
+    const row = (k, v, title = '') => rows.push(
+      `<dt${title ? ` title="${esc(title)}"` : ''}>${esc(k)}</dt><dd>${v}</dd>`);
+
+    if (s.uploaded != null) row('Uploaded', esc(bytes(s.uploaded)));
+    if (s.downloaded != null) row('Downloaded', esc(bytes(s.downloaded)));
+    if (s.buffer != null) {
+      row('Buffer', `${s.buffer < 0 ? '−' : ''}${esc(bytes(Math.abs(s.buffer)))}`,
+        'Uploaded minus downloaded.');
+    }
+    if (s.headroom != null) {
+      const floor = (s.ratio_floor ?? 1).toFixed(2);
+      row(`Room to ${floor}`,
+        s.headroom < 0
+          ? `<strong>${esc(bytes(-s.headroom))} short</strong>`
+          : esc(bytes(s.headroom)),
+        s.ratio_floor_configured
+          ? `How much more you can download before your ratio falls to your ${floor} floor.`
+          : 'How much more you can download before your ratio falls to 1.00. Set a minimum ratio on this tracker to measure against your own floor.');
+    }
+    if (s.bonus != null) row('Bonus points', esc(Number(s.bonus).toLocaleString()));
+    if (s.hit_and_runs != null) {
+      row('Hit-and-runs', s.hit_and_runs ? `<strong>${s.hit_and_runs}</strong>` : '0',
+        'Hit-and-runs the site currently counts against your account.');
+    }
+    if (s.seeding != null) {
+      row('Site counts seeding', `${s.seeding}`,
+        'How many torrents the tracker believes you are seeding.');
+    }
+    rows.push('<span class="rule"></span>');
+    row('Seeding in client', `${s.local_seeding}`,
+      'Complete, not-stopped torrents from this site in qBittorrent.');
+    if (unseen) {
+      row('Not announcing', `<strong>${unseen}</strong>`,
+        'Seeding in your client but not counted by the site, so they earn nothing. Usually a passkey or announce problem.');
+    }
+    const local = s.local || null;
+    if (local) {
+      row('Uploading now', `${local.uploading}`);
+      row('Upload speed', esc(rate(local.upspeed)));
+    }
+
     const alarms = warnings.map((w) => `<div class="warn-line">⚠ ${esc(w)}</div>`).join('');
     return `
       <div class="stat ${cls}">
         <div class="value">${s.ratio != null ? s.ratio.toFixed(2) : '—'}</div>
-        <div class="label">${esc(s.name || id)}</div>
-        <div class="sub">${parts.join(' · ')}</div>
+        <div class="label">${esc(s.name || id)} · account ratio</div>
+        <dl class="kv">${rows.join('')}</dl>
         ${alarms}
       </div>`;
   }).join('')}</div>`;
