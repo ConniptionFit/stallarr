@@ -28,6 +28,7 @@ from ..models import (
     SeedingRequirement,
     TrackerFreeleechEntry,
     TrackerHealth,
+    TrackerListing,
     TrackerTorrentInfo,
     UserStats,
 )
@@ -60,6 +61,10 @@ class Capability(StrEnum):
     SEEDING_REQUIREMENTS = "seeding_requirements"
     #: list our own torrents with their freeleech status
     FREELEECH_STATUS = "freeleech_status"
+    #: list the site's torrents with swarm stats, for the ratio builder. One
+    #: request per tracker per discovery run, on its own slow schedule; never
+    #: called from the health scan.
+    BROWSE = "browse"
 
 
 #: Tracker messages that mean "this torrent is gone, stop retrying".
@@ -285,6 +290,16 @@ class TrackerPlugin:
         One call per tracker per scan, same budget as `seeding_requirements`.
         Return `[]` when the site has no such listing or nothing to report;
         never raise for "nothing here".
+        """
+        return []
+
+    async def browse(self) -> list[TrackerListing]:
+        """A page of the site's torrents with swarm stats, best candidates first.
+
+        One request per call. The ratio builder calls it at most once per
+        tracker per discovery run, so the plugin's rate limit is never the
+        only thing standing between it and a ban. Return `[]` when the site
+        has no usable listing.
         """
         return []
 

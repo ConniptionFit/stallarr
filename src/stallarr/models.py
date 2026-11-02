@@ -214,6 +214,11 @@ class ActionKind(StrEnum):
     #: this one off a list would make destruction just another rung. It runs
     #: only from `recovery/reap.py`, behind its own switch.
     DELETE = "delete"
+    #: Add a torrent the ratio builder picked (`discovery/grab.py`). Not a
+    #: repair at all, so like REDOWNLOAD and DELETE it is absent from the
+    #: ladder, `HANDLERS` and `AILMENT_ACTIONS`; it is here so grabs show up
+    #: in history and the history filter like every other action.
+    GRAB = "grab"
     ESCALATE = "escalate"
 
 
@@ -375,6 +380,40 @@ class TrackerFreeleechEntry:
     name: str
     torrent_id: str | None = None
     freeleech: bool | None = None
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TrackerListing:
+    """One row from a tracker's browse/search listing, for the ratio builder.
+
+    Unlike `TrackerTorrentInfo` this describes a torrent we probably do *not*
+    hold, so the tracker's own id is the identity and the infohash is a bonus.
+    Every swarm field is optional: a site that omits one must read as
+    "unknown", never as zero, or a missing `leechers` would score as no demand
+    and a missing `free` as "costs full ratio" on a freeleech torrent.
+    """
+
+    tracker: str
+    torrent_id: str
+    name: str
+    size: int | None = None
+    seeders: int | None = None
+    leechers: int | None = None
+    times_completed: int | None = None
+    #: Unix timestamp the torrent was uploaded.
+    created_at: int | None = None
+    #: Freeleech discount, 0-100. 100 = the download does not count at all.
+    free_pct: int | None = None
+    double_upload: bool | None = None
+    featured: bool | None = None
+    #: Seeded from a registered seedbox; those take most of the upload.
+    highspeed: bool | None = None
+    infohash: str | None = None
+    category: str | None = None
+    #: The site's own download link, when it hands one out. Contains the
+    #: rsskey, so it is never shown in the UI or written to a log.
+    download_url: str | None = None
     raw: dict = field(default_factory=dict)
 
 

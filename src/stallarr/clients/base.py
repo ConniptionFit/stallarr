@@ -38,7 +38,12 @@ class TorrentClient(Protocol):
     async def recheck(self, infohash: str) -> None: ...
 
     async def set_share_limits(
-        self, infohash: str, *, ratio: float | None = None, seeding_minutes: int | None = None
+        self,
+        infohash: str,
+        *,
+        ratio: float | None = None,
+        seeding_minutes: int | None = None,
+        inactive_minutes: int | None = None,
     ) -> None: ...
 
     async def add_tracker(self, infohash: str, url: str) -> None: ...

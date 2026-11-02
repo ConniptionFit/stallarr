@@ -18,6 +18,7 @@ from . import db
 from .clients import ClientError, TorrentClient, build_client
 from .config import Config
 from .diagnosis import diagnose_local, enrich, should_skip
+from .discovery import Discovery
 from .models import (
     ActionResult,
     Ailment,
@@ -89,6 +90,8 @@ class StallarrService:
         #: Free space reported by the client, refreshed each scan.
         self.disk: dict[str, Any] = {}
         self.scanning = False
+        #: The ratio builder. Owns its own loop; see discovery/__init__.py.
+        self.discovery = Discovery(self)
 
         self._scan_lock = asyncio.Lock()
         self._wake = asyncio.Event()
@@ -102,9 +105,11 @@ class StallarrService:
         await self._auto_sync_prowlarr()
         await self._build()
         self._task = asyncio.create_task(self._loop(), name="stallarr-scan-loop")
+        self.discovery.start()
 
     async def stop(self) -> None:
         self._stopping = True
+        await self.discovery.stop()
         self._wake.set()
         if self._task:
             self._task.cancel()
@@ -155,6 +160,8 @@ class StallarrService:
         logging.getLogger("stallarr").setLevel(self.cfg.log_level.upper())
         await self._build()
         self.trigger_scan()
+        # A changed tracker list or filter should show up now, not next hour.
+        self.discovery.trigger()
 
     async def _auto_sync_prowlarr(self) -> None:
         """Refresh tracker credentials from Prowlarr, if that is switched on.

@@ -25,9 +25,16 @@ a mismatch is a config change rather than a code change:
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
-from ..models import TrackerFreeleechEntry, TrackerHealth, TrackerTorrentInfo, UserStats
+from ..models import (
+    TrackerFreeleechEntry,
+    TrackerHealth,
+    TrackerListing,
+    TrackerTorrentInfo,
+    UserStats,
+)
 from ..utils import looks_like_torrent
 from .base import Capability, TrackerError, TrackerPlugin
 
@@ -44,7 +51,12 @@ class Unit3dPlugin(TrackerPlugin):
             Capability.TORRENT_FILE,
             Capability.TORRENT_INFO,
             Capability.USER_STATS,
+            Capability.BROWSE,
         }
+        # By-id downloads need a URL we can build without a lookup, which
+        # takes either the rsskey or an explicit template.
+        if self._passkey or self.option("download_template"):
+            base.add(Capability.TORRENT_FILE_BY_ID)
         # Opt-in only: the "my uploads" filter param and the freeleech field
         # name both vary across UNIT3D forks and are unverified here. See
         # freeleech_status() for what options.freeleech_enabled requires.
@@ -164,13 +176,78 @@ class Unit3dPlugin(TrackerPlugin):
         url = self._download_url(info)
         if not url:
             return None
+        return await self.download(url)
 
+    async def fetch_torrent_file_by_id(self, torrent_id: str) -> bytes | None:
+        url = self._download_url(TrackerTorrentInfo(infohash="", torrent_id=torrent_id))
+        if not url:
+            return None
+        return await self.download(url)
+
+    async def download(self, url: str) -> bytes:
+        """Fetch a .torrent from a URL the site handed out (`download_link`)."""
         resp = await self.get(url)
         if resp.status_code >= 400:
             raise TrackerError(f"{self.id}: download returned HTTP {resp.status_code}")
         if not looks_like_torrent(resp.content):
             raise TrackerError(f"{self.id}: download did not return a .torrent file")
         return resp.content
+
+    #: Browse query for the ratio builder: live torrents, most-wanted first.
+    #: One page only. Merge site- or taste-specific filters in through
+    #: `options.browse_params` (e.g. `{"free": 100}` for freeleech-only, or
+    #: `{"categories[]": 1}`): UNIT3D filters server-side, which is far
+    #: cheaper than paging the whole catalogue.
+    browse_defaults: dict[str, Any] = {  # noqa: RUF012 - read-only class default
+        "perPage": 100,
+        "sortField": "leechers",
+        "sortDirection": "desc",
+        "alive": 1,
+    }
+
+    async def browse(self) -> list[TrackerListing]:
+        if not self.cfg.api_key:
+            return []
+        params = dict(self.browse_defaults)
+        extra = self.option("browse_params", {})
+        if isinstance(extra, dict):
+            params.update(extra)
+
+        path = self.option("filter_path", "/api/torrents/filter")
+        resp = await self.get(path, params=params)
+        if resp.status_code in (401, 403):
+            raise TrackerError(f"{self.id}: API token rejected (HTTP {resp.status_code})")
+        if resp.status_code >= 400:
+            raise TrackerError(f"{self.id}: browse returned HTTP {resp.status_code}")
+
+        out = []
+        for record in self._attributes(self._json(resp)):
+            torrent_id = record.get("id")
+            name = record.get("name")
+            if torrent_id is None or not name:
+                continue
+            link = record.get("download_link")
+            out.append(
+                TrackerListing(
+                    tracker=self.id,
+                    torrent_id=str(torrent_id),
+                    name=str(name),
+                    size=_as_bytes(record.get("size")),
+                    seeders=_as_int(record.get("seeders")),
+                    leechers=_as_int(record.get("leechers")),
+                    times_completed=_as_int(record.get("times_completed")),
+                    created_at=_as_timestamp(record.get("created_at")),
+                    free_pct=_as_pct(_first(record, "freeleech", "free")),
+                    double_upload=_as_bool(_first(record, "double_upload", "doubleup")),
+                    featured=_as_bool(record.get("featured")),
+                    highspeed=_as_bool(record.get("highspeed")),
+                    infohash=_as_infohash(record.get("info_hash")),
+                    category=_as_label(record.get("category")),
+                    download_url=link if isinstance(link, str) and link else None,
+                    raw=record,
+                )
+            )
+        return out
 
     def _download_url(self, info: TrackerTorrentInfo) -> str | None:
         template = self.option("download_template")
@@ -284,6 +361,58 @@ def _as_bool(value: Any) -> bool | None:
             return True
         if low in ("false", "no", "0", ""):
             return False
+    return None
+
+
+def _as_pct(value: Any) -> int | None:
+    """Freeleech as a 0-100 discount.
+
+    UNIT3D's API resource renders it as a string like "100%", its database as
+    an int, and some forks as a bool. Unknown stays None: reading a missing
+    field as 0 would price a freeleech torrent at full ratio cost.
+    """
+    if isinstance(value, bool):
+        return 100 if value else 0
+    if isinstance(value, (int, float)):
+        return max(0, min(int(value), 100))
+    if isinstance(value, str):
+        number = _as_float(value.strip().rstrip("%"))
+        if number is not None:
+            return max(0, min(int(number), 100))
+        flag = _as_bool(value)
+        if flag is not None:
+            return 100 if flag else 0
+    return None
+
+
+def _as_timestamp(value: Any) -> int | None:
+    """Unix seconds from an ISO-8601 string or a number. None if unparseable."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return int(parsed.timestamp())
+
+
+def _as_infohash(value: Any) -> str | None:
+    if isinstance(value, str) and len(value.strip()) == 40:
+        return value.strip().lower()
+    return None
+
+
+def _as_label(value: Any) -> str | None:
+    """Category/type fields arrive as a string or as {"name": ...}."""
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        name = value.get("name")
+        return str(name) if name else None
     return None
 
 

@@ -258,10 +258,21 @@ class QbittorrentClient:
     #: keeps a global limit they set later in force.
     USE_GLOBAL_LIMIT = -2
 
+    #: qBittorrent's "never" for a share limit.
+    NO_LIMIT = -1
+
     async def set_share_limits(
-        self, infohash: str, *, ratio: float | None = None, seeding_minutes: int | None = None
+        self,
+        infohash: str,
+        *,
+        ratio: float | None = None,
+        seeding_minutes: int | None = None,
+        inactive_minutes: int | None = None,
     ) -> None:
-        """Set per-torrent share limits. None leaves that limit untouched.
+        """Set per-torrent share limits.
+
+        None means "use the global setting" for ratio and seeding time, and
+        "keep what the torrent has" for the inactive-time limit.
 
         qBittorrent 5 requires *every* field on this endpoint — including
         `shareLimitAction`, which it rejects the whole call for omitting — so
@@ -278,7 +289,11 @@ class QbittorrentClient:
                 self.USE_GLOBAL_LIMIT if seeding_minutes is None else seeding_minutes
             ),
             "inactiveSeedingTimeLimit": (
-                current.inactive_seeding_time_limit if current else self.USE_GLOBAL_LIMIT
+                inactive_minutes
+                if inactive_minutes is not None
+                else current.inactive_seeding_time_limit
+                if current
+                else self.USE_GLOBAL_LIMIT
             ),
         }
         # Absent on qBittorrent 4, which also does not accept the parameter.

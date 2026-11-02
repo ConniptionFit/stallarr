@@ -300,6 +300,31 @@ def build_router() -> APIRouter:
     async def seeding_view(request: Request) -> dict:
         return await _service(request).seeding_view()
 
+    # --- ratio builder --------------------------------------------------------
+
+    @router.get("/discovery", dependencies=guarded)
+    async def discovery_view(request: Request) -> dict:
+        return await _service(request).discovery.view()
+
+    @router.post("/discovery/refresh", dependencies=guarded)
+    async def discovery_refresh(request: Request) -> dict:
+        discovery = _service(request).discovery
+        if not (discovery.cfg.enabled and discovery.cfg.trackers):
+            return {"ok": False, "detail": "turn the ratio builder on and pick trackers in Settings"}
+        wait = discovery.refresh_allowed_in()
+        if wait:
+            return {"ok": False, "detail": f"browsed recently; try again in {wait // 60 + 1} min"}
+        await discovery.run()
+        return {"ok": True, "detail": f"{len(discovery.candidates)} candidate(s)"}
+
+    @router.post("/discovery/grab", dependencies=guarded)
+    async def discovery_grab(request: Request, payload: dict = Body(...)) -> dict:
+        tracker = str(payload.get("tracker") or "")
+        torrent_id = str(payload.get("torrent_id") or "")
+        if not tracker or not torrent_id:
+            raise HTTPException(400, "tracker and torrent_id are required")
+        return await _service(request).discovery.grab(tracker, torrent_id)
+
     # --- actions --------------------------------------------------------------
 
     @router.post("/scan", dependencies=guarded)

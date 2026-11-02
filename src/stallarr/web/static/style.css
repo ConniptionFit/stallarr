@@ -294,3 +294,5 @@ td.name a:hover { border-bottom-color: currentColor; }
   .detail { grid-template-columns: 1fr; }
   .detail dt { margin-top: 6px; }
 }
+#tab-discover .torrent-filters select { width: auto; flex: 0 0 auto; }
+#discover-status, #discover-budget { margin: 6px 0; line-height: 1.8; }

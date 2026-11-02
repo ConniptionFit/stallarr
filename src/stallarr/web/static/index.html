@@ -48,6 +48,7 @@
     <button class="tab" data-tab="deletions">Deleted</button>
     <button class="tab" data-tab="trackers">Trackers</button>
     <button class="tab" data-tab="seeding">Seeding</button>
+    <button class="tab" data-tab="discover">Discover</button>
     <button class="tab" data-tab="settings">Settings</button>
     <button class="tab" data-tab="logs">Logs</button>
   </nav>
@@ -326,6 +327,60 @@
           <button class="tiny ghost" id="seeding-page-prev">Previous</button>
           <span class="muted" id="seeding-page-label"></span>
           <button class="tiny ghost" id="seeding-page-next">Next</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Discover (ratio builder) -->
+    <section class="panel" id="tab-discover">
+      <div class="glass card">
+        <div class="card-head">
+          <h2>Ratio builder</h2>
+          <span class="muted" id="discover-meta"></span>
+          <button class="tiny ghost" id="discover-refresh">Refresh now</button>
+        </div>
+        <p class="muted hint" id="discover-intro">
+          Torrents likely to keep earning upload, ranked by leechers against seeders and
+          snatches per day, discounted by what the download costs your ratio. Grabs go into
+          their own category with unlimited share limits so purge rules leave them alone.
+        </p>
+        <div id="discover-status" class="muted"></div>
+        <div id="discover-budget" class="muted"></div>
+
+        <div class="filters torrent-filters">
+          <input type="search" id="discover-search" placeholder="Search name…" autocomplete="off">
+          <select id="discover-tracker"><option value="">all trackers</option></select>
+          <select id="discover-strategy">
+            <option value="">all strategies</option>
+            <option value="long-tail">long-tail (30+ days)</option>
+            <option value="cooling">cooling (3–30 days)</option>
+            <option value="burst">burst (under 3 days)</option>
+          </select>
+        </div>
+
+        <div class="table-wrap">
+          <table id="discover-table">
+            <thead>
+              <tr>
+                <th>Name</th><th>Tracker</th><th>Score</th><th>Strategy</th>
+                <th>Seeders / leechers</th><th>Snatches / day</th><th>Age</th><th>Size</th>
+                <th>Freeleech</th><th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="glass card">
+        <div class="card-head"><h2>Recent grabs</h2></div>
+        <div class="table-wrap">
+          <table id="discover-grabs">
+            <thead>
+              <tr><th>When</th><th>Name</th><th>Tracker</th><th>Size</th><th>Score</th><th>Strategy</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
         </div>
       </div>
     </section>
