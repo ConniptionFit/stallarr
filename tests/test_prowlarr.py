@@ -16,9 +16,7 @@ def indexer(name, definition, urls, fields, protocol="torrent"):
     }
 
 
-UNIT3D = indexer(
-    "Darkpeers (API)", "darkpeers", ["https://darkpeers.org/"], {"apikey": "tok-dp"}
-)
+UNIT3D = indexer("Darkpeers (API)", "darkpeers", ["https://darkpeers.org/"], {"apikey": "tok-dp"})
 COOKIE_SITE = indexer(
     "IPTorrents",
     "IPTorrents",
@@ -57,20 +55,85 @@ async def test_unknown_site_needs_a_confirmed_unit3d_api(monkeypatch):
     assert proposal.supported
 
 
-async def test_unknown_site_that_fails_the_probe_is_reported_not_guessed():
+async def test_unknown_site_that_fails_the_probe_comes_in_on_the_generic_driver(monkeypatch):
+    """Every Prowlarr tracker should show up, but never guessed to be UNIT3D."""
+
     async def denies(url, api_key):
         return False
 
-    original = prowlarr._speaks_unit3d
-    prowlarr._speaks_unit3d = denies
-    try:
-        [proposal] = await prowlarr.plan([UNKNOWN])
-    finally:
-        prowlarr._speaks_unit3d = original
+    monkeypatch.setattr(prowlarr, "_speaks_unit3d", denies)
+    [proposal] = await prowlarr.plan([UNKNOWN])
+
+    assert proposal.supported
+    assert proposal.plugin == "generic"
+    assert proposal.hosts == ["seedpool.org"]
+    # Kept so a later sync that confirms UNIT3D is connected straight away.
+    assert proposal.values["api_key"] == "tok-sp"
+
+
+async def test_indexer_with_no_url_is_reported_not_imported():
+    nowhere = indexer("Mystery", "mystery", [], {})
+    [proposal] = await prowlarr.plan([nowhere], probe=False)
 
     assert not proposal.supported
-    assert not proposal.values
-    assert "ADDING_A_TRACKER" in proposal.detail
+
+
+async def test_a_confirmed_unit3d_site_is_not_probed_again(monkeypatch):
+    async def must_not_probe(url, api_key):
+        raise AssertionError("probed a site already known to be UNIT3D")
+
+    monkeypatch.setattr(prowlarr, "_speaks_unit3d", must_not_probe)
+    [proposal] = await prowlarr.plan([UNKNOWN], known={"seedpool": "unit3d"})
+
+    assert proposal.plugin == "unit3d"
+
+
+async def test_one_failed_probe_does_not_demote_a_unit3d_tracker(monkeypatch):
+    async def denies(url, api_key):
+        return False
+
+    monkeypatch.setattr(prowlarr, "_speaks_unit3d", denies)
+    cfg = Config.model_validate({"trackers": {"seedpool": {"plugin": "unit3d", "api_key": "k"}}})
+    proposals = await prowlarr.plan([UNKNOWN])
+
+    prowlarr.apply(cfg, proposals, overwrite=True)
+
+    assert cfg.trackers["seedpool"].plugin == "unit3d"
+
+
+async def test_a_generic_tracker_is_upgraded_once_unit3d_is_confirmed(monkeypatch):
+    async def confirms(url, api_key):
+        return True
+
+    monkeypatch.setattr(prowlarr, "_speaks_unit3d", confirms)
+    cfg = Config.model_validate({"trackers": {"seedpool": {"plugin": "generic", "hosts": ["seedpool.org"]}}})
+    proposals = await prowlarr.plan([UNKNOWN], known={"seedpool": "generic"})
+
+    result = prowlarr.apply(cfg, proposals)
+
+    assert cfg.trackers["seedpool"].plugin == "unit3d"
+    # Must count as a change, or the auto-sync would never save the upgrade.
+    assert "plugin" in result["imported"][0]["changed"]
+
+
+async def test_rsskey_is_not_mistaken_for_the_announce_passkey():
+    site = indexer("Darkpeers (API)", "darkpeers", ["https://darkpeers.org/"], {"rsskey": "rss"})
+    [proposal] = await prowlarr.plan([site], probe=False)
+
+    assert "passkey" not in proposal.values
+
+
+async def test_sync_reports_added_and_updated_separately(monkeypatch):
+    async def indexers(self):
+        return [UNIT3D, COOKIE_SITE]
+
+    monkeypatch.setattr(prowlarr.ProwlarrClient, "indexers", indexers)
+    cfg = Config.model_validate({"trackers": {"iptorrents": {"enabled": True}}})
+
+    result = await prowlarr.sync(cfg, probe=False)
+
+    assert result["added"] == ["darkpeers"]
+    assert result["updated"] == ["iptorrents"]  # gained Prowlarr's extra hosts
 
 
 async def test_usenet_indexers_are_ignored():

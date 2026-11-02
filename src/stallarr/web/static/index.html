@@ -298,7 +298,7 @@
       <div class="glass card">
         <div class="card-head">
           <h2>Import from Prowlarr</h2>
-          <span class="muted">Pulls API keys and discovers trackers you are on.</span>
+          <span class="muted">Adds every torrent tracker in Prowlarr and pulls its API key.</span>
         </div>
         <div class="settings-grid">
           <div class="field"><label>Prowlarr URL</label>
@@ -306,8 +306,16 @@
           <div class="field"><label>Prowlarr API key</label>
             <input id="prowlarr-key" type="password" placeholder="Settings → General"></div>
           <div class="field"><label>&nbsp;</label>
-            <label class="inline"><input type="checkbox" id="prowlarr-autosync"> keep credentials in sync automatically</label></div>
+            <label class="inline"><input type="checkbox" id="prowlarr-autosync"> sync automatically</label></div>
+          <div class="field"><label>Sync every (minutes)</label>
+            <input id="prowlarr-interval" type="number" min="15" step="5" placeholder="60"></div>
         </div>
+        <p class="muted note">
+          Automatic sync adds new trackers as they appear in Prowlarr and replaces
+          API keys that were rotated there. Sites that are neither a known plugin nor
+          stock UNIT3D come in on the generic driver: their torrents are monitored
+          from qBittorrent, but stallarr cannot ask the site about them.
+        </p>
         <p class="muted note">
           Prowlarr masks cookies and never stores announce passkeys, so
           cookie-authenticated sites (IPTorrents) and the <code>refresh announce</code>
@@ -317,8 +325,9 @@
         <div class="card-foot">
           <button id="prowlarr-test" class="ghost">Test connection</button>
           <button id="prowlarr-preview" class="ghost">Preview</button>
-          <button id="prowlarr-import" class="primary">Import</button>
+          <button id="prowlarr-import" class="primary">Sync now</button>
           <span class="muted" id="prowlarr-status"></span>
+          <span class="muted" id="prowlarr-last"></span>
         </div>
       </div>
 

@@ -22,8 +22,14 @@ assumed:
 Sites with no plugin file are still importable: stock UNIT3D is common enough
 that a config entry pointing at the generic `unit3d` base plugin is a complete,
 working tracker. We only propose that after confirming the site actually speaks
-UNIT3D, so an unrecognised tracker is reported as unsupported instead of being
-enabled and quietly failing every lookup.
+UNIT3D. A site that does not is still brought in, on the `generic` base: it makes
+no API calls at all, so it cannot fail lookups, but its announce hosts route
+torrents to it and stallarr monitors them from client data. Leaving it out made
+"every tracker in Prowlarr" silently mean "every UNIT3D tracker in Prowlarr".
+
+A `generic` verdict never downgrades a tracker already running on `unit3d`: the
+probe is one request to a site that can be having a bad minute, and a site that
+answered once has not stopped running UNIT3D.
 """
 
 from __future__ import annotations
@@ -55,7 +61,9 @@ _FIELD_MAP = {
     "cookie": "cookie",
     "passkey": "passkey",
     "torrent_pass": "passkey",
-    "rsskey": "passkey",
+    # Deliberately absent: "rsskey". On UNIT3D it is a different secret from the
+    # announce passkey, and with the recurring sync overwriting, mapping it would
+    # replace a hand-entered passkey with one that fails every announce.
 }
 
 
@@ -220,8 +228,19 @@ async def _speaks_unit3d(url: str, api_key: str) -> bool:
     return isinstance(payload, dict) and isinstance(payload.get("data"), list)
 
 
-async def plan(indexers: list[dict[str, Any]], *, probe: bool = True) -> list[Proposal]:
-    """Resolve Prowlarr indexers into things stallarr could configure."""
+async def plan(
+    indexers: list[dict[str, Any]],
+    *,
+    probe: bool = True,
+    known: dict[str, str] | None = None,
+) -> list[Proposal]:
+    """Resolve Prowlarr indexers into things stallarr could configure.
+
+    `known` maps tracker id -> base plugin for trackers already in config. A
+    site already confirmed as UNIT3D is not probed again: the recurring sync
+    would otherwise spend a request per site per run re-learning what it knew.
+    """
+    known = known or {}
     proposals: list[Proposal] = []
 
     for indexer in indexers:
@@ -255,9 +274,9 @@ async def plan(indexers: list[dict[str, Any]], *, probe: bool = True) -> list[Pr
             )
             continue
 
-        is_unit3d = bool(values.get("api_key")) and (
-            not probe or await _speaks_unit3d(url, values["api_key"])
-        )
+        has_key = bool(values.get("api_key"))
+        already_unit3d = known.get(slug) == "unit3d"
+        is_unit3d = has_key and (not probe or already_unit3d or await _speaks_unit3d(url, values["api_key"]))
         if is_unit3d:
             proposals.append(
                 Proposal(
@@ -270,6 +289,23 @@ async def plan(indexers: list[dict[str, Any]], *, probe: bool = True) -> list[Pr
                     detail="no plugin file — UNIT3D API confirmed, will use the generic driver",
                 )
             )
+        elif hosts:
+            proposals.append(
+                Proposal(
+                    tracker_id=slug,
+                    name=name,
+                    url=url,
+                    hosts=hosts,
+                    # Kept even though nothing uses them yet: a later sync that
+                    # confirms UNIT3D, or a plugin file, picks them straight up.
+                    values=values,
+                    plugin="generic",
+                    detail=(
+                        "no plugin file and no UNIT3D API answered — added for monitoring "
+                        "from client data; site lookups need a plugin (ADDING_A_TRACKER.md)"
+                    ),
+                )
+            )
         else:
             proposals.append(
                 Proposal(
@@ -279,10 +315,7 @@ async def plan(indexers: list[dict[str, Any]], *, probe: bool = True) -> list[Pr
                     hosts=hosts,
                     values={},
                     supported=False,
-                    detail=(
-                        "no plugin file and the site does not answer the UNIT3D API — "
-                        "needs a plugin in trackers/ (see ADDING_A_TRACKER.md)"
-                    ),
+                    detail="Prowlarr lists no URL for this indexer, so its torrents cannot be matched",
                 )
             )
 
@@ -338,7 +371,15 @@ def apply(
         # A config-defined tracker needs its identity written down; one backed by
         # a plugin file gets the extra announce domains Prowlarr knows about.
         if proposal.plugin:
-            tracker.plugin = proposal.plugin
+            # One failed probe must not demote a site that answered as UNIT3D
+            # before; see the module docstring.
+            # An existing entry with no base set already runs on unit3d (that is
+            # build_plugin's default), so it counts as confirmed too.
+            downgrade = proposal.plugin == "generic" and existing is not None and tracker.plugin != "generic"
+            if not downgrade and tracker.plugin != proposal.plugin:
+                tracker.plugin = proposal.plugin
+                if existing is not None:
+                    changed.append("plugin")
             tracker.name = tracker.name or proposal.name
             merged = list(dict.fromkeys([*tracker.hosts, *proposal.hosts]))
             if merged != tracker.hosts:
@@ -374,7 +415,13 @@ async def sync(
 ) -> dict[str, Any]:
     """Fetch, plan and apply in one go. Mutates `cfg`; the caller saves it."""
     indexers = await ProwlarrClient(cfg.prowlarr).indexers()
-    proposals = await plan(indexers, probe=probe)
+    # A blank base means unit3d to build_plugin, so it means unit3d here too.
+    known = {tracker_id: t.plugin or "unit3d" for tracker_id, t in cfg.trackers.items()}
+    proposals = await plan(indexers, probe=probe, known=known)
     result = apply(cfg, proposals, overwrite=overwrite, enable=enable)
+    result["added"] = [i["tracker_id"] for i in result["imported"] if "created" in i["changed"]]
+    result["updated"] = [
+        i["tracker_id"] for i in result["imported"] if i["changed"] and "created" not in i["changed"]
+    ]
     result["proposals"] = [p.public() for p in proposals]
     return result
