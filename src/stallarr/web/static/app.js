@@ -996,29 +996,60 @@ function renderTrackerDetail(trackerStatus = {}) {
   });
 }
 
-/** Read the visible form back into the draft for the selected tracker. */
+/** A form box's value in the shape the config stores, for comparison. */
+function trackerFieldValue(field, raw) {
+  if (field.kind === 'list') return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (field.kind === 'number') {
+    // Blank means "off", which the config stores as 0. Anything unparseable is
+    // passed through as typed so the server can say what is wrong with it.
+    const text = raw.trim();
+    if (text === '') return 0;
+    const num = Number(text);
+    return Number.isFinite(num) ? num : text;
+  }
+  return raw.trim();
+}
+
+function sameValue(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Read the visible form back into the draft for the selected tracker.
+ *
+ * Only fields that differ from the saved config go into the draft. Merely
+ * looking at a tracker must not queue it for saving: a draft full of unchanged
+ * values is how editing one site's API key ended up re-sending (and failing to
+ * validate) every tracker that had been opened along the way.
+ */
 function captureTrackerDraft() {
   const node = $('#plugin-detail .plugin');
   if (!node) return;
   const id = node.dataset.plugin;
   const saved = (state.config.trackers && state.config.trackers[id]) || {};
-  const draft = { enabled: $('[data-field="enabled"]', node).checked };
+  const draft = {};
+
+  const enabled = $('[data-field="enabled"]', node).checked;
+  if (enabled !== Boolean(saved.enabled)) draft.enabled = enabled;
 
   TRACKER_FIELDS.forEach((field) => {
     const el = $(`[data-field="${field.name}"]`, node);
     if (!el) return;
-    if (field.kind === 'list') {
-      draft[field.name] = el.value.split(',').map((s) => s.trim()).filter(Boolean);
-    } else if (field.secret) {
-      // Blank means unchanged: send the sentinel back so the server keeps
-      // the stored secret rather than clearing it.
-      draft[field.name] = el.value === '' ? (saved[field.name] === SENTINEL ? SENTINEL : '') : el.value;
-    } else {
-      draft[field.name] = el.value.trim();
+    if (field.secret) {
+      // A stored secret never reaches the browser, so a blank box means
+      // "keep what is stored" and only a typed value is a change.
+      if (el.value !== '') draft[field.name] = el.value;
+      return;
     }
+    const value = trackerFieldValue(field, el.value);
+    const current = field.kind === 'list' ? (saved[field.name] || [])
+      : field.kind === 'number' ? (saved[field.name] ?? 0)
+      : (saved[field.name] ?? '');
+    if (!sameValue(value, current)) draft[field.name] = value;
   });
 
-  state.trackerDraft[id] = draft;
+  if (Object.keys(draft).length) state.trackerDraft[id] = draft;
+  else delete state.trackerDraft[id];
 }
 
 $('#tracker-picker').addEventListener('change', (event) => {
@@ -1029,10 +1060,11 @@ $('#tracker-picker').addEventListener('change', (event) => {
 
 $('#save-trackers').addEventListener('click', async () => {
   captureTrackerDraft();
+  // Drafts hold only changed fields, so this patch is exactly the edits: other
+  // trackers, and other fields of this one, are left as stored.
   const trackers = {};
   Object.entries(state.trackerDraft).forEach(([id, draft]) => {
-    const saved = (state.config.trackers && state.config.trackers[id]) || {};
-    trackers[id] = { ...draft, options: saved.options || {} };
+    if (Object.keys(draft).length) trackers[id] = { ...draft };
   });
 
   if (!Object.keys(trackers).length) {
