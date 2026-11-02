@@ -32,6 +32,7 @@ from .models import (
 from .notify import Notifier
 from .recovery import RecoveryEngine, breaker_report, reap, redownload, tracker_of
 from .recovery.redownload import attempt_key as redownload_key
+from .stats import download_headroom, library_stats, problems_by_ailment
 from .trackers import TrackerRouter, load_plugins
 from .trackers.base import Capability, TrackerError
 from .utils import normalise_release
@@ -59,6 +60,9 @@ class ScanSummary:
     healthy: int = 0
     sick: int = 0
     actions: int = 0
+    #: Previously-sick torrents that passed every check on this scan. The
+    #: outcome the repair ladder exists for; nothing else records it.
+    recovered: int = 0
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -89,6 +93,9 @@ class StallarrService:
         self.deletion_blocks: list[dict[str, Any]] = []
         #: Free space reported by the client, refreshed each scan.
         self.disk: dict[str, Any] = {}
+        #: Whole-library totals from the last scan's torrent list. Computed
+        #: from data already fetched, so it costs no extra client or tracker call.
+        self.library: dict[str, Any] = library_stats([])
         self.scanning = False
         #: The ratio builder. Owns its own loop; see discovery/__init__.py.
         self.discovery = Discovery(self)
@@ -286,6 +293,7 @@ class StallarrService:
 
         ignored = await db.ignored_hashes()
         summary.total = len(torrents)
+        self.library = library_stats(torrents, self.router)
         diagnoses: list[Diagnosis] = []
         # Chosen before the loop so the oldest checks go first: picking as we go
         # would spend the budget on whatever the client happened to list first.
@@ -333,6 +341,7 @@ class StallarrService:
             if diagnosis.healthy:
                 summary.healthy += 1
                 if _was_previously_sick(torrent, self.cfg):
+                    summary.recovered += 1
                     await self.engine.on_recovered(diagnosis)
                 continue
 
@@ -678,6 +687,12 @@ class StallarrService:
                 condemned=len(await db.list_condemned()),
                 owed=len(self.seeding_report),
                 duration=summary.duration,
+                uploaded=self.library.get("uploaded", 0),
+                downloaded=self.library.get("downloaded", 0),
+                upspeed=self.library.get("upspeed", 0),
+                seeding=self.library.get("seeding", 0),
+                uploading=self.library.get("uploading", 0),
+                recovered=summary.recovered,
             )
         except Exception:
             log.debug("could not record scan snapshot", exc_info=True)
@@ -772,6 +787,8 @@ class StallarrService:
                 "dry_run": self.cfg.recovery.dry_run,
             },
             "issues": [_diagnosis_json(d) for d in self.last_diagnoses],
+            "library": self.library,
+            "problems_by_ailment": problems_by_ailment(self.last_diagnoses),
             # Seeding owed on torrents the client does not hold — nothing here
             # can repair these, so they need to be visible rather than counted.
             "seeding_unmatched": self.seeding_unmatched,
@@ -790,6 +807,7 @@ class StallarrService:
             **self.snapshot(),
             "seeding": await self.seeding_metrics(),
             "deletions": await db.deletion_totals(SEEDING_WINDOW_DAYS),
+            "repairs": await db.repair_stats(SEEDING_WINDOW_DAYS),
             "condemned": await self.pending_deletions(),
         }
 
@@ -853,12 +871,17 @@ class StallarrService:
         number reveals that on its own.
         """
         local = await self._local_seed_counts()
+        library = {row["tracker"]: row for row in self.library.get("by_tracker", [])}
         out: dict[str, Any] = {}
 
         for plugin_id, plugin in self.router.plugins.items():
             entry: dict[str, Any] = {
                 "name": plugin.name,
                 "local_seeding": local.get(plugin_id, 0),
+                # What this tracker's torrents are doing in the client, from
+                # the last scan. Labelled "in client" in the UI: it is not the
+                # account figure above it and must not be read as one.
+                "local": library.get(plugin_id),
             }
 
             if plugin.can(Capability.USER_STATS):
@@ -880,9 +903,20 @@ class StallarrService:
                     )
                     if stats.seeding is not None:
                         entry["unseen_seeds"] = max(entry["local_seeding"] - stats.seeding, 0)
-                    entry["warnings"] = _account_warnings(
-                        stats, self.cfg.trackers.get(plugin_id)
+                    tracker_cfg = self.cfg.trackers.get(plugin_id)
+                    floor = getattr(tracker_cfg, "min_ratio", 0.0) or 0.0
+                    # Which floor the headroom was measured against, so a
+                    # number with no floor configured is not mistaken for one
+                    # measured against a rule the user set.
+                    entry["ratio_floor"] = floor if floor > 0 else 1.0
+                    entry["ratio_floor_configured"] = floor > 0
+                    entry["headroom"] = download_headroom(stats.uploaded, stats.downloaded, floor)
+                    entry["buffer"] = (
+                        stats.uploaded - stats.downloaded
+                        if stats.uploaded is not None and stats.downloaded is not None
+                        else None
                     )
+                    entry["warnings"] = _account_warnings(stats, tracker_cfg)
 
             out[plugin_id] = entry
         return out

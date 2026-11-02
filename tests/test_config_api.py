@@ -187,3 +187,61 @@ def test_a_fresh_config_already_has_every_step():
     cfg = Config()
 
     assert cfg.recovery.ladder == [str(step) for step in DEFAULT_LADDER]
+
+
+# --- per-tracker saves -------------------------------------------------------
+
+
+def test_blank_tracker_thresholds_mean_unset_not_invalid():
+    """A cleared number box arrives as "" and must not fail the whole save."""
+    from stallarr.config import TrackerConfig
+
+    cfg = TrackerConfig.model_validate({"min_ratio": "", "max_hit_and_runs": "  "})
+    assert cfg.min_ratio == 0.0
+    assert cfg.max_hit_and_runs == 0
+
+    cfg = TrackerConfig.model_validate({"min_ratio": None, "max_hit_and_runs": None})
+    assert (cfg.min_ratio, cfg.max_hit_and_runs) == (0.0, 0)
+
+
+def test_tracker_thresholds_still_reject_garbage():
+    import pytest
+    from pydantic import ValidationError
+
+    from stallarr.config import TrackerConfig
+
+    with pytest.raises(ValidationError):
+        TrackerConfig.model_validate({"min_ratio": "lots"})
+
+
+def test_updating_one_trackers_key_leaves_every_other_field_alone():
+    base = Config.model_validate(
+        {
+            "trackers": {
+                "darkpeers": {"enabled": True, "api_key": "dp", "min_ratio": 1.0},
+                "oldtoons": {"enabled": True, "api_key": "old", "max_hit_and_runs": 3},
+            }
+        }
+    ).model_dump(mode="json")
+
+    merged = _merge(base, {"trackers": {"oldtoons": {"api_key": "new"}}})
+    cfg = Config.model_validate(merged)
+
+    assert cfg.trackers["oldtoons"].api_key == "new"
+    assert cfg.trackers["oldtoons"].max_hit_and_runs == 3
+    assert cfg.trackers["oldtoons"].enabled is True
+    assert cfg.trackers["darkpeers"].model_dump() == base["trackers"]["darkpeers"]
+
+
+def test_the_reported_save_now_validates():
+    """The exact payload shape from the bug: blank thresholds on two trackers."""
+    base = Config().model_dump(mode="json")
+    payload = {
+        "trackers": {
+            "darkpeers": {"min_ratio": "", "max_hit_and_runs": ""},
+            "oldtoons": {"api_key": "new", "min_ratio": "", "max_hit_and_runs": ""},
+        }
+    }
+    cfg = Config.model_validate(_merge(base, payload))
+    assert cfg.trackers["oldtoons"].api_key == "new"
+    assert cfg.trackers["darkpeers"].min_ratio == 0.0

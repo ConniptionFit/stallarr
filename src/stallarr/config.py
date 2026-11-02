@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .models import DEFAULT_LADDER
 
@@ -200,6 +200,16 @@ class TrackerConfig(BaseModel):
     #: before acting, so the useful alarm is "approaching", not "any at all".
     max_hit_and_runs: int = 0
     options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("min_ratio", "max_hit_and_runs", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: Any) -> Any:
+        # Both thresholds are optional and 0 means "off". A cleared form box
+        # arrives as "" (or null), and failing the save over it is how editing
+        # one tracker's API key ends up blocked by another tracker's blank box.
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 0
+        return value
 
     # --- config-defined trackers ----------------------------------------------
     # Set only when there is no plugin file for this tracker. Most private sites

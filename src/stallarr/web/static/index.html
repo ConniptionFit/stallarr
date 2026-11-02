@@ -56,7 +56,7 @@
   <main>
     <!-- Dashboard -->
     <section class="panel active" id="tab-dashboard">
-      <div class="stat-grid" id="stat-grid"></div>
+      <div id="stat-sections"></div>
       <div class="glass card danger-card" id="breaker-card" hidden>
         <div class="card-head">
           <h2>Deletion held back</h2>
@@ -92,9 +92,60 @@
       <div class="glass card" id="trend-card" hidden>
         <div class="card-head">
           <h2>Trend</h2>
-          <span class="muted" id="trend-meta"></span>
+          <div class="filters">
+            <span class="muted" id="trend-meta"></span>
+            <div class="segmented" id="trend-window" role="group" aria-label="Trend window">
+              <button class="tiny ghost" data-days="1">24h</button>
+              <button class="tiny ghost active" data-days="7">7d</button>
+              <button class="tiny ghost" data-days="30">30d</button>
+            </div>
+          </div>
         </div>
         <div id="trend-charts" class="trend-grid"></div>
+      </div>
+
+      <div class="card-row">
+        <div class="glass card" id="problems-card">
+          <div class="card-head">
+            <h2>Problems by type</h2>
+            <span class="muted" id="problems-meta"></span>
+          </div>
+          <div id="problems-bars"></div>
+          <p class="muted note">Each torrent is counted once, under its most serious problem, so these add up to the Problems total.</p>
+        </div>
+
+        <div class="glass card" id="repairs-card">
+          <div class="card-head">
+            <h2>Repairs by step</h2>
+            <span class="muted" id="repairs-meta"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Step</th><th>Tried</th><th>Accepted</th><th>Failed</th><th>Torrents</th></tr></thead>
+              <tbody id="repairs-body"></tbody>
+            </table>
+          </div>
+          <p class="muted note">“Accepted” means the client carried the step out. Whether the torrent then
+            recovered is the separate <strong>Recovered</strong> figure above.</p>
+        </div>
+      </div>
+
+      <div class="glass card" id="library-card" hidden>
+        <div class="card-head">
+          <h2>Upload by tracker</h2>
+          <span class="muted">Torrents currently in your client. Account totals live on the Trackers tab.</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tracker</th><th>Torrents</th><th>Seeding</th><th>Uploading now</th>
+                <th>Uploaded</th><th>Downloaded</th><th>Client ratio</th><th>Upload speed</th><th>Share of upload</th>
+              </tr>
+            </thead>
+            <tbody id="library-body"></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="glass card" id="seeding-metrics-card" hidden>
@@ -286,7 +337,7 @@
       <div class="glass card">
         <div class="card-head">
           <h2>Account stats</h2>
-          <span class="muted">Tracker totals, checked against what you are actually seeding.</span>
+          <span class="muted">What each site reports for your account, checked against what your client is actually seeding.</span>
         </div>
         <div id="tracker-stats" class="muted">Loading…</div>
       </div>
