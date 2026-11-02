@@ -22,6 +22,7 @@ const state = {
   // should not cost a round trip.
   seeding: [],
   seedingPage: 0,
+  discover: null,
   trendDays: 7,
 };
 
@@ -206,6 +207,7 @@ async function refresh() {
     if (state.activeTab === 'logs') await loadLogs();
     if (state.activeTab === 'trackers') { renderPlugins(status); await loadTrackerStats(); }
     if (state.activeTab === 'seeding') await loadSeeding();
+    if (state.activeTab === 'discover') await loadDiscover();
   } catch (err) {
     if (err.message !== 'authentication required') toast(err.message, 'bad');
   }
@@ -965,6 +967,145 @@ function seedingRow(r) {
 $('#seeding-page-prev').addEventListener('click', () => { state.seedingPage -= 1; renderSeeding(); });
 $('#seeding-page-next').addEventListener('click', () => { state.seedingPage += 1; renderSeeding(); });
 
+// --- discover (ratio builder) ------------------------------------------------
+
+async function loadDiscover() {
+  state.discover = await api('/discovery');
+  const d = state.discover;
+  syncOptions($('#discover-tracker'),
+    [...new Set(d.candidates.map((c) => c.tracker))].sort(), 'all trackers');
+
+  $('#discover-meta').textContent = d.last_run
+    ? `last browsed ${ago(d.last_run)}${d.running ? ' · browsing…' : ''}`
+    : (d.running ? 'browsing…' : '');
+
+  const status = Object.entries(d.status || {}).map(([id, s]) =>
+    `<span class="pill ${s.ok ? 'ok' : 'bad'}" title="${esc(s.detail || '')}">${esc(s.name || id)}: ${esc(s.detail || '')}</span>`);
+  if (!d.enabled) {
+    $('#discover-status').innerHTML = 'Off. Turn it on and pick trackers under <b>Settings, Ratio builder</b>.';
+  } else if (!d.trackers.length) {
+    $('#discover-status').innerHTML = 'On, but no trackers picked. Add tracker ids under <b>Settings, Ratio builder</b>.';
+  } else {
+    $('#discover-status').innerHTML = status.join(' ') || 'Waiting for the first browse…';
+  }
+
+  const b = d.budget;
+  const excluded = Object.entries(d.excluded || {}).map(([k, n]) => `${n} ${k}`).join(', ');
+  $('#discover-budget').innerHTML = [
+    b.max
+      ? `Disk: <b>${bytes(b.used)}</b> of ${bytes(b.max)} in <code>${esc(b.category)}</code>`
+      : '<span class="pill warn">no disk budget set: grabbing is off</span>',
+    b.free != null ? `${bytes(b.free)} free (floor ${bytes(b.min_free)})` : '',
+    `up to ${b.max_grabs_per_day} grab(s) per tracker per day`,
+    d.freeleech_only ? 'freeleech only' : 'paid downloads allowed',
+    d.dry_run ? '<span class="pill warn">dry run</span>' : '',
+    excluded ? `skipped: ${esc(excluded)}` : '',
+  ].filter(Boolean).join(' · ');
+
+  renderDiscover();
+  renderGrabs(d.grabs || []);
+}
+
+function renderDiscover() {
+  const d = state.discover;
+  if (!d) return;
+  const needle = $('#discover-search').value.trim().toLowerCase();
+  const tracker = $('#discover-tracker').value;
+  const strategy = $('#discover-strategy').value;
+  const rows = d.candidates.filter((c) =>
+    (!needle || c.name.toLowerCase().includes(needle))
+    && (!tracker || c.tracker === tracker)
+    && (!strategy || c.strategy === strategy));
+
+  const body = $('#discover-table tbody');
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="10" class="empty">${d.candidates.length
+      ? 'Nothing matches these filters.' : 'No candidates yet.'}</td></tr>`;
+    return;
+  }
+  const canGrab = d.budget.max > 0;
+  body.innerHTML = rows.map((c) => {
+    const p = c.parts || {};
+    const why = [
+      `demand ${p.demand} (leechers ÷ seeders+1)`,
+      `velocity ${p.velocity} (log2 of 1 + snatches/day)`,
+      `age ×${p.age_factor}`,
+      `upload ×${p.upload_mult}`,
+      `competition ×${p.competition}`,
+      `÷ cost ${p.cost}`,
+    ].join('\n');
+    const fl = c.free_pct == null ? '<span class="muted">—</span>'
+      : c.free_pct >= 100 ? '<span class="pill ok">100%</span>'
+      : c.free_pct > 0 ? `<span class="pill warn">${c.free_pct}%</span>`
+      : '<span class="muted">no</span>';
+    const extras = [
+      c.double_upload ? '<span class="pill ok">2x up</span>' : '',
+      c.highspeed ? '<span class="pill warn">seedbox</span>' : '',
+    ].join(' ');
+    return `
+      <tr>
+        <td class="name">${esc(c.name)}</td>
+        <td><span class="pill">${esc(c.tracker)}</span></td>
+        <td title="${esc(why)}"><b>${c.score.toFixed(2)}</b></td>
+        <td>${esc(c.strategy)}</td>
+        <td>${c.seeders ?? '?'} / ${c.leechers ?? '?'}</td>
+        <td>${p.snatches_per_day ?? '—'}</td>
+        <td>${p.age_days >= 0 ? `${p.age_days}d` : '—'}</td>
+        <td>${c.size ? bytes(c.size) : '—'}</td>
+        <td>${fl} ${extras}</td>
+        <td><button class="tiny" data-grab="${esc(c.tracker)}|${esc(c.torrent_id)}"
+             ${canGrab ? '' : 'disabled title="Set a disk budget in Settings first"'}>Grab</button></td>
+      </tr>`;
+  }).join('');
+
+  $$('[data-grab]', body).forEach((btn) => btn.addEventListener('click', async () => {
+    const [trackerId, torrentId] = btn.dataset.grab.split('|');
+    btn.disabled = true;
+    try {
+      const res = await api('/discovery/grab', {
+        method: 'POST',
+        body: JSON.stringify({ tracker: trackerId, torrent_id: torrentId }),
+      });
+      toast(res.message, res.ok ? 'good' : 'bad');
+      await loadDiscover();
+    } catch (err) {
+      toast(err.message, 'bad');
+      btn.disabled = false;
+    }
+  }));
+}
+
+function renderGrabs(grabs) {
+  const body = $('#discover-grabs tbody');
+  if (!grabs.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">Nothing grabbed yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = grabs.map((g) => `
+    <tr>
+      <td class="muted">${ago(g.grabbed_at)}</td>
+      <td class="name">${esc(g.name)}</td>
+      <td><span class="pill">${esc(g.tracker)}</span></td>
+      <td>${bytes(g.size)}</td>
+      <td>${Number(g.score).toFixed(2)}</td>
+      <td>${esc(g.strategy)}</td>
+    </tr>`).join('');
+}
+
+['#discover-search', '#discover-tracker', '#discover-strategy'].forEach((sel) => {
+  $(sel).addEventListener('input', renderDiscover);
+});
+
+$('#discover-refresh').addEventListener('click', async () => {
+  try {
+    const res = await api('/discovery/refresh', { method: 'POST' });
+    toast(res.detail, res.ok ? 'good' : 'bad');
+    await loadDiscover();
+  } catch (err) {
+    toast(err.message, 'bad');
+  }
+});
+
 // --- detail drawer ------------------------------------------------------------
 
 function openDrawer(infohash) {
@@ -1535,6 +1676,21 @@ const SETTINGS_SCHEMA = [
   { path: 'recovery.delete_max_tracker_fraction', label: 'Abort if this fraction of a tracker is unregistered', type: 'number' },
   { path: 'recovery.delete_export_torrents', label: 'Keep the .torrent file before deleting', type: 'checkbox' },
   { path: 'recovery.delete_export_dir', label: 'Keep them in' },
+
+  { group: 'Ratio builder' },
+  { path: 'discovery.enabled', label: 'Find torrents worth seeding long-term', type: 'checkbox' },
+  { path: 'discovery.trackers', label: 'Trackers to browse (ids, e.g. darkpeers)', type: 'list' },
+  { path: 'discovery.interval_minutes', label: 'Browse every (minutes)', type: 'number' },
+  { path: 'discovery.freeleech_only', label: 'Freeleech only', type: 'checkbox' },
+  { path: 'discovery.min_size_gb', label: 'Min size (GB)', type: 'number' },
+  { path: 'discovery.max_size_gb', label: 'Max size (GB, 0 = any)', type: 'number' },
+  { path: 'discovery.max_disk_gb', label: 'Disk budget (GB, 0 = no grabbing)', type: 'number' },
+  { path: 'discovery.min_free_gb', label: 'Always keep free (GB)', type: 'number' },
+  { path: 'discovery.max_grabs_per_day', label: 'Max grabs per tracker per day', type: 'number' },
+  { path: 'discovery.category', label: 'Category for grabs' },
+  { path: 'discovery.save_path', label: 'Save path override (blank = by category)' },
+  { path: 'discovery.tags', label: 'Tags for grabs', type: 'list' },
+  { path: 'discovery.unlimited_share_limits', label: 'Set unlimited share limits on grabs', type: 'checkbox' },
 
   { group: 'Metrics' },
   { path: 'web.metrics_enabled', label: 'Expose Prometheus /metrics (unauthenticated)', type: 'checkbox' },

@@ -309,6 +309,76 @@ class WebConfig(BaseModel):
     oidc_auto_redirect: bool = False
 
 
+class DiscoveryWeights(BaseModel):
+    """Knobs on the ratio builder's score. See `discovery/score.py`."""
+
+    #: Weight on leechers / (seeders + 1): demand right now.
+    demand: float = 1.0
+    #: Weight on snatches per day: demand that keeps arriving, the long-tail
+    #: signal.
+    velocity: float = 1.0
+    #: How much a paid (non-freeleech) download divides the score by. 1.0
+    #: halves a full-price torrent against an otherwise identical freeleech one.
+    paid_penalty: float = 1.0
+    #: Above this many seeders a home connection is rarely picked by leechers,
+    #: so the score falls off in proportion.
+    crowded_seeders: int = 50
+
+
+class DiscoveryConfig(BaseModel):
+    """The ratio builder: find torrents worth seeding long-term, and grab them.
+
+    Off by default, and opt-in per tracker on top of that: browsing a site's
+    catalogue is a different kind of traffic from looking up torrents you
+    already hold, and some sites' rules forbid automated grabbing outright.
+    """
+
+    enabled: bool = False
+    #: Trackers to browse, by id. Empty = none, not all: each site is a
+    #: separate decision about that site's rules.
+    trackers: list[str] = Field(default_factory=list)
+    #: Minutes between browse runs. Each run is one request per tracker.
+    interval_minutes: int = 60
+    #: How many ranked candidates to keep for the Discover tab.
+    max_candidates: int = 50
+
+    # --- what counts as a candidate ---------------------------------------------
+    #: Only torrents whose download costs no ratio. Unknown freeleech status is
+    #: treated as "not freeleech" under this switch.
+    freeleech_only: bool = True
+    min_size_gb: float = 0.0
+    #: 0 = no upper bound.
+    max_size_gb: float = 100.0
+
+    # --- grabbing ----------------------------------------------------------------
+    #: Total size the ratio builder may occupy, counted over torrents in
+    #: `category`. 0 refuses every grab: there is no safe default for how much
+    #: of someone's disk to fill.
+    max_disk_gb: float = 0.0
+    #: Never let a grab take free space below this.
+    min_free_gb: float = 50.0
+    #: Per tracker, per rolling 24 hours.
+    max_grabs_per_day: int = 5
+    #: qBittorrent category for grabs. Keeping them in their own category is
+    #: what keeps *arr "remove completed" (which only touches its own
+    #: categories) away from them, and what the disk budget counts.
+    category: str = "stallarr-ratio"
+    save_path: str = ""
+    use_auto_tmm: bool = True
+    #: Tags for grabs, for purge tools that filter by tag (qbit_manage share
+    #: limit groups, autoremove-torrents). Deliberately not `stallarr:`-prefixed:
+    #: that prefix tells the diagnosis rules a pause was stallarr's doing, and a
+    #: grab you pause by hand is yours.
+    tags: list[str] = Field(default_factory=lambda: ["stallarr-keep", "stallarr-discovered"])
+    #: Set per-torrent ratio, seeding-time and inactive-time limits to "never"
+    #: on every grab. qBittorrent's own purge is its share-limit action, and it
+    #: ignores tags and categories, so this is the protection that needs no
+    #: other tool configured.
+    unlimited_share_limits: bool = True
+
+    weights: DiscoveryWeights = Field(default_factory=DiscoveryWeights)
+
+
 class Config(BaseModel):
     scan_interval_minutes: int = 10
     log_level: str = "INFO"
@@ -319,6 +389,7 @@ class Config(BaseModel):
     notify: NotifyConfig = Field(default_factory=NotifyConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     prowlarr: ProwlarrConfig = Field(default_factory=ProwlarrConfig)
+    discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     #: Keyed by tracker plugin id, e.g. "iptorrents", "darkpeers".
     trackers: dict[str, TrackerConfig] = Field(default_factory=dict)
 

@@ -27,6 +27,7 @@ src/stallarr/
                       reap.py (guarded deletion), redownload.py (unmatched H&R debts)
   notify/__init__.py  Notifier: discord + telegram + ntfy, severity filter, dedupe
   integrations/       prowlarr.py: import tracker credentials
+  discovery/          ratio builder: score.py (pure ranking), grab.py (guarded add)
   logging_setup.py    stdout + in-memory ring buffer the UI's log view reads
   web/routes.py       API; static/ (app.js, index.html, style.css) is the dashboard
   web/oidc.py         OIDC code flow;  web/metrics.py  hand-rolled Prometheus gauges
@@ -252,6 +253,34 @@ which is why there is no JWT library here; see the module docstring in
 `web/oidc.py` for why that is sound. `oidc.configured()` requires issuer, client
 id *and* secret: "enabled but half-filled" has to read as off, or a bad save
 locks you out of the settings page that would fix it.
+
+**The ratio builder browses on its own clock, never in the scan.**
+`discovery/` calls `Capability.BROWSE` once per opted-in tracker per run
+(`discovery.interval_minutes`, floored at `MIN_BROWSE_GAP` per tracker however
+it is triggered). Browsing a catalogue is a different kind of traffic from
+looking up torrents you hold, and some sites forbid it, which is why it is
+opt-in per tracker id and not "every enabled tracker".
+
+A grab puts data on disk and a seeding obligation on the account, so
+`discovery/grab.py::preflight` runs every check *before* the download and each
+fails closed: a disk budget of 0 (the default) refuses everything, unknown free
+space refuses, the daily cap is per tracker. `db.discovered` is written only for
+a real add, never a dry run, because it backs both "already grabbed" and the cap.
+The grab endpoint takes ids only and looks the listing up in the server's own
+candidate cache; nothing else the browser sends is trusted.
+
+Protection from purging is three layers because there are three kinds of
+purger: per-torrent unlimited share limits (qBittorrent's share-limit action
+ignores tags and categories), a dedicated category (*arr apps only remove from
+their own), and tags for qbit_manage-style tools. The tags are `stallarr-keep`,
+*not* `stallarr:keep`: a `stallarr:` prefix makes `rules._check_paused` treat a
+user's pause as stallarr's own and resume it. `TrackerListing.download_url`
+embeds the rsskey, so `Scored.as_dict` leaves it out and grab history goes
+through `redact_secrets`.
+
+Unknown is never zero in `TrackerListing`: a missing `free` reads as "not
+freeleech" (excluded under `freeleech_only`), a missing `leechers` as no demand
+credit, a missing `size` as ineligible (the disk budget cannot be checked).
 
 **Env vars beat the config file, so the UI must say so.** `config.load()`
 reapplies `STALLARR_*` over anything saved, which means a pinned field accepts

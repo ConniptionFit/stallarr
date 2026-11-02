@@ -18,6 +18,7 @@ from . import db
 from .clients import ClientError, TorrentClient, build_client
 from .config import Config
 from .diagnosis import diagnose_local, enrich, should_skip
+from .discovery import Discovery
 from .models import (
     ActionResult,
     Ailment,
@@ -31,9 +32,9 @@ from .models import (
 from .notify import Notifier
 from .recovery import RecoveryEngine, breaker_report, reap, redownload, tracker_of
 from .recovery.redownload import attempt_key as redownload_key
+from .stats import download_headroom, library_stats, problems_by_ailment
 from .trackers import TrackerRouter, load_plugins
 from .trackers.base import Capability, TrackerError
-from .stats import download_headroom, library_stats, problems_by_ailment
 from .utils import normalise_release
 
 log = logging.getLogger(__name__)
@@ -96,6 +97,8 @@ class StallarrService:
         #: from data already fetched, so it costs no extra client or tracker call.
         self.library: dict[str, Any] = library_stats([])
         self.scanning = False
+        #: The ratio builder. Owns its own loop; see discovery/__init__.py.
+        self.discovery = Discovery(self)
 
         self._scan_lock = asyncio.Lock()
         self._wake = asyncio.Event()
@@ -109,9 +112,11 @@ class StallarrService:
         await self._auto_sync_prowlarr()
         await self._build()
         self._task = asyncio.create_task(self._loop(), name="stallarr-scan-loop")
+        self.discovery.start()
 
     async def stop(self) -> None:
         self._stopping = True
+        await self.discovery.stop()
         self._wake.set()
         if self._task:
             self._task.cancel()
@@ -162,6 +167,8 @@ class StallarrService:
         logging.getLogger("stallarr").setLevel(self.cfg.log_level.upper())
         await self._build()
         self.trigger_scan()
+        # A changed tracker list or filter should show up now, not next hour.
+        self.discovery.trigger()
 
     async def _auto_sync_prowlarr(self) -> None:
         """Refresh tracker credentials from Prowlarr, if that is switched on.

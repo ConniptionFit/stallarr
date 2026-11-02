@@ -267,6 +267,69 @@ Re-downloads are capped per scan, and each torrent is retried a limited number
 of times with a cooldown, so a tracker listing something it will not serve
 cannot be asked forever.
 
+## Ratio builder
+
+The **Discover** tab finds torrents likely to keep earning upload for months,
+and grabs the ones you pick. Off by default, and opt-in per tracker on top of
+that: check each site's rules on automated downloading before you add it.
+Today it can browse UNIT3D sites (anything using the `unit3d` driver).
+
+**How it ranks.** Each candidate gets a score for expected upload per GB of
+disk. The inputs are leechers against seeders (demand now), snatches per day
+(demand that keeps arriving), age, freeleech and double upload. Crowded swarms
+and seedbox-heavy swarms are marked down. Hover a score to see its breakdown.
+Strategies:
+
+| Strategy | Age | What it means |
+| --- | --- | --- |
+| burst | under 3 days | the first rush; big but short payoff |
+| cooling | 3 to 30 days | rush fading; weighted down |
+| long-tail | 30+ days | steady demand; weighted up, the point of the feature |
+
+Torrents already in the client, already grabbed, with no seeders, or outside
+your size limits are skipped. With **freeleech only** on (the default), so is
+anything that would cost ratio to download.
+
+**What a grab does.** It downloads the .torrent, checks it matches the listing,
+and adds it hash-checked into its own category (`stallarr-ratio`) with the tags
+`stallarr-keep` and `stallarr-discovered`. Then it sets the torrent's ratio,
+seeding-time and inactive-time limits to *unlimited*. That last part matters:
+qBittorrent's own purge is its share-limit action, and it ignores tags and
+categories entirely.
+
+**Guards.** Grabbing is refused until you set a **disk budget**, counted over the
+category. It is also refused when it would push free space under the floor,
+when free space is unknown, or past the per-tracker daily cap. Dry run reports
+and downloads nothing. Browsing is one request per tracker per run (hourly by
+default), never part of the health scan, and never more than once per 5 minutes
+however often you press Refresh.
+
+**Narrowing the listing.** Per tracker, `options.browse_params` is merged into
+the UNIT3D filter query, so the site does the filtering:
+
+```json
+"darkpeers": { "options": { "browse_params": { "free": 100, "categories[]": 1 } } }
+```
+
+### Keeping other purge tools away
+
+- **\*arr "remove completed"** only touches its own categories, so the dedicated
+  category is enough. Don't point `discovery.category` at a sonarr/radarr one.
+- **qbit_manage**: give the tag its own share-limit group, ahead of your others:
+
+  ```yaml
+  share_limits:
+    stallarr_keep:
+      priority: 1
+      include_any_tags: ["stallarr-keep"]
+      max_ratio: -1
+      max_seeding_time: -1
+      cleanup: false
+  ```
+
+- **autoremove-torrents** and similar: exclude the `stallarr-ratio` category or
+  the `stallarr-keep` tag in their config.
+
 ## Signing in
 
 Three options, set under **Settings → Web**:
@@ -404,6 +467,9 @@ POST /api/torrents/{hash}/reset        clear the recovery ladder
 GET  /api/condemned                    what is queued for deletion, and why
 POST /api/condemned/{hash}/keep        spare one permanently
 GET  /api/deletions                    the permanent record of what went
+GET  /api/discovery                    ratio-builder candidates, budget, grabs
+POST /api/discovery/refresh            browse now (floored at 5 min per tracker)
+POST /api/discovery/grab               {"tracker": "...", "torrent_id": "..."}
 GET  /api/snapshots?days=7             per-scan history behind the trend charts
 GET  /health                           container healthcheck
 GET  /metrics                          Prometheus, when web.metrics_enabled

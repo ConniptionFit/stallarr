@@ -145,6 +145,24 @@ CREATE TABLE IF NOT EXISTS scan_snapshots (
     recovered INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON scan_snapshots (ts DESC);
+
+-- Every torrent the ratio builder added. Keyed by the tracker's own id, since
+-- that is what a listing carries; the infohash comes from the .torrent itself.
+-- A row is written only for a real add (never a dry run), so "already
+-- grabbed" and the per-day cap both describe what actually reached the client.
+CREATE TABLE IF NOT EXISTS discovered (
+    tracker     TEXT NOT NULL,
+    torrent_id  TEXT NOT NULL,
+    infohash    TEXT NOT NULL DEFAULT '',
+    name        TEXT NOT NULL DEFAULT '',
+    size        INTEGER NOT NULL DEFAULT 0,
+    score       REAL NOT NULL DEFAULT 0,
+    strategy    TEXT NOT NULL DEFAULT '',
+    free_pct    INTEGER NOT NULL DEFAULT 0,
+    grabbed_at  INTEGER NOT NULL,
+    PRIMARY KEY (tracker, torrent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_discovered_at ON discovered (grabbed_at DESC);
 """
 
 #: Columns added after a table first shipped. `CREATE TABLE IF NOT EXISTS` does
@@ -826,6 +844,46 @@ async def should_notify(key: str, window_seconds: int) -> bool:
 
 
 # --- manual ignores -----------------------------------------------------------
+
+
+async def record_grab(
+    *,
+    tracker: str,
+    torrent_id: str,
+    infohash: str,
+    name: str,
+    size: int,
+    score: float,
+    strategy: str,
+    free_pct: int,
+) -> None:
+    await asyncio.to_thread(
+        _exec,
+        """INSERT OR REPLACE INTO discovered
+           (tracker, torrent_id, infohash, name, size, score, strategy, free_pct, grabbed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (tracker, torrent_id, infohash, name, size, score, strategy, free_pct, int(time.time())),
+    )
+
+
+async def grabbed_keys() -> set[tuple[str, str]]:
+    rows = await asyncio.to_thread(_rows, "SELECT tracker, torrent_id FROM discovered")
+    return {(r["tracker"], r["torrent_id"]) for r in rows}
+
+
+async def grabs_since(tracker: str, since: float) -> int:
+    rows = await asyncio.to_thread(
+        _rows,
+        "SELECT COUNT(*) AS n FROM discovered WHERE tracker = ? AND grabbed_at >= ?",
+        (tracker, int(since)),
+    )
+    return int(rows[0]["n"]) if rows else 0
+
+
+async def list_grabs(limit: int = 200) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(
+        _rows, "SELECT * FROM discovered ORDER BY grabbed_at DESC LIMIT ?", (limit,)
+    )
 
 
 async def add_ignore(infohash: str, name: str = "", reason: str = "") -> None:
