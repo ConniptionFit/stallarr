@@ -1,4 +1,8 @@
-# stallarr — notes for Claude Code
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## stallarr
 
 Torrent health monitor. Reads qBittorrent, decides what's wrong with each
 torrent, then runs the cheapest repair that could plausibly fix it. FastAPI +
@@ -11,6 +15,7 @@ It's one file in `src/stallarr/trackers/`; do not edit the registry.
 
 ```
 src/stallarr/
+  main.py             FastAPI app factory + lifespan; __main__.py runs uvicorn
   service.py          supervisor: owns client + plugins + scan loop, holds UI state
   config.py           JSON config in DATA_DIR, STALLARR_* env overrides
   models.py           domain types; AILMENT_ACTIONS is the recovery policy
@@ -18,10 +23,13 @@ src/stallarr/
   clients/            qbittorrent.py implements clients/base.py's protocol
   trackers/           plugin registry; base.py -> unit3d.py -> per-site files
   diagnosis/rules.py  client state -> list of ailments
-  recovery/           actions.py (the steps), engine.py (which step, when)
-  notify/             discord + telegram
+  recovery/           actions.py (the steps), engine.py (which step, when),
+                      reap.py (guarded deletion), redownload.py (unmatched H&R debts)
+  notify/__init__.py  Notifier: discord + telegram + ntfy, severity filter, dedupe
   integrations/       prowlarr.py: import tracker credentials
-  web/routes.py       API; static/ is the dashboard
+  logging_setup.py    stdout + in-memory ring buffer the UI's log view reads
+  web/routes.py       API; static/ (app.js, index.html, style.css) is the dashboard
+  web/oidc.py         OIDC code flow;  web/metrics.py  hand-rolled Prometheus gauges
 ```
 
 ## Design decisions worth knowing before you change things
@@ -259,14 +267,25 @@ at: it is only proposed as UNIT3D after `_speaks_unit3d` confirms it.
 ## Working on it
 
 ```bash
-.venv/bin/python -m pytest -q                          # 96 tests, no network
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest pytest-asyncio ruff
+.venv/bin/python -m pytest -q                          # whole suite, no network, a few seconds
+.venv/bin/python -m pytest -q tests/test_rules.py      # one file
+.venv/bin/python -m pytest -q tests/test_reap.py -k breaker   # by name
+.venv/bin/ruff check src tests                         # lint (config in pyproject.toml)
 DATA_DIR=./data PYTHONPATH=src .venv/bin/python -m stallarr   # localhost:8383
 docker compose up -d --build
 ```
 
+Python 3.12+. pytest runs in `asyncio_mode = "auto"`, so async tests need no
+marker, and `pythonpath = ["src"]` means no install step for tests. The tree is
+not `ruff format`-clean, so don't run the formatter repo-wide: it produces a
+diff across dozens of unrelated files. Format only what you touch.
+
 Tests use a real sqlite DB in a temp `DATA_DIR` (set in `tests/conftest.py`
 before any stallarr import — keep it that way, `config.DATA_DIR` binds at import
-time). `FakeClient` in `test_engine.py` records calls; use it rather than mocking
+time). Shared fixtures such as `make_torrent` live in `conftest.py` and are
+imported directly (`from conftest import make_torrent`). `FakeClient` in
+`test_engine.py` records calls; use it rather than mocking
 httpx.
 
 The config file is the source of truth and the UI writes it. Secrets come back
