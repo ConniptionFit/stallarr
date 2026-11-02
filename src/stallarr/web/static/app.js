@@ -205,7 +205,11 @@ async function refresh() {
     if (state.activeTab === 'history') await loadHistory();
     if (state.activeTab === 'deletions') await loadDeletions();
     if (state.activeTab === 'logs') await loadLogs();
-    if (state.activeTab === 'trackers') { renderPlugins(status); await loadTrackerStats(); }
+    if (state.activeTab === 'trackers') {
+      renderPlugins(status);
+      renderProwlarrLast(status.prowlarr);
+      await loadTrackerStats();
+    }
     if (state.activeTab === 'seeding') await loadSeeding();
     if (state.activeTab === 'discover') await loadDiscover();
   } catch (err) {
@@ -1543,7 +1547,9 @@ function prowlarrPayload() {
 
 function renderProposals(proposals) {
   const rows = proposals.map((p) => {
-    const cls = p.supported ? (p.provides.length ? 'ok' : 'warn') : 'bad';
+    // Generic-driver trackers are imported but cannot be looked up, so they
+    // read as a warning rather than as fully connected.
+    const cls = !p.supported ? 'bad' : (p.provides.length && p.plugin !== 'generic' ? 'ok' : 'warn');
     const provides = p.provides.length
       ? p.provides.map((f) => `<span class="pill ok">${esc(label(f))}</span>`).join(' ')
       : '<span class="pill warn">no credentials available</span>';
@@ -1589,11 +1595,14 @@ $('#prowlarr-preview').addEventListener('click', async () => {
 });
 
 $('#prowlarr-import').addEventListener('click', async () => {
-  const res = await prowlarrCall('/prowlarr/import', 'Importing');
+  const res = await prowlarrCall('/prowlarr/import', 'Syncing');
   if (!res) return;
   renderProposals(res.proposals);
-  const changed = res.imported.filter((i) => i.changed.length);
-  toast(changed.length ? `Imported ${changed.length} tracker(s)` : 'Everything was already up to date', 'good');
+  const added = (res.added || []).length;
+  const updated = (res.updated || []).length;
+  toast(added || updated
+    ? `Added ${added}, updated ${updated} tracker(s)`
+    : 'Everything was already up to date', 'good');
   state.trackerDraft = {};
   await Promise.all([loadConfig(), loadPlugins()]);
   await saveProwlarrSettings();
@@ -1602,15 +1611,50 @@ $('#prowlarr-import').addEventListener('click', async () => {
 
 async function saveProwlarrSettings() {
   const payload = prowlarrPayload();
-  await saveConfig({
-    prowlarr: {
-      enabled: true,
-      url: payload.url,
-      api_key: payload.api_key,
-      auto_sync: $('#prowlarr-autosync').checked,
-    },
+  const fields = {
+    enabled: true,
+    url: payload.url,
+    api_key: payload.api_key,
+    auto_sync: $('#prowlarr-autosync').checked,
+    sync_interval_minutes: prowlarrInterval(),
+  };
+  // Same rule as the settings form: an env-pinned value sent from here would be
+  // baked into config.json and outlive the variable.
+  const pinned = state.meta.env_pinned || {};
+  const prowlarr = {};
+  Object.entries(fields).forEach(([key, value]) => {
+    if (!pinned[`prowlarr.${key}`]) prowlarr[key] = value;
   });
+  await saveConfig({ prowlarr });
 }
+
+function prowlarrInterval() {
+  const value = parseInt($('#prowlarr-interval').value, 10);
+  // The server floors this anyway; clamping here keeps the box honest.
+  return Number.isFinite(value) ? Math.max(value, 15) : 60;
+}
+
+function renderProwlarrLast(info) {
+  const last = (info && info.last) || {};
+  const el = $('#prowlarr-last');
+  if (!last.at) {
+    el.textContent = info && info.auto_sync ? `Syncs every ${info.interval_minutes} min` : '';
+    return;
+  }
+  const when = new Date(last.at * 1000).toLocaleString();
+  const how = last.trigger === 'auto' ? 'Auto-synced' : 'Synced';
+  el.textContent = last.ok
+    ? `${how} ${when}: ${last.added.length} added, ${last.updated.length} updated of ${last.total}`
+    : `${how} ${when} failed: ${last.error}`;
+  el.title = last.added.length ? `Added: ${last.added.join(', ')}` : '';
+}
+
+$('#prowlarr-interval').addEventListener('change', async () => {
+  try {
+    await saveProwlarrSettings();
+    toast('Prowlarr settings saved', 'good');
+  } catch (err) { toast(err.message, 'bad'); }
+});
 
 $('#prowlarr-autosync').addEventListener('change', async () => {
   try {
@@ -1625,6 +1669,16 @@ function renderProwlarrSettings() {
   $('#prowlarr-key').value = '';
   $('#prowlarr-key').placeholder = cfg.api_key === SENTINEL ? 'saved — leave blank to keep' : 'Settings → General';
   $('#prowlarr-autosync').checked = !!cfg.auto_sync;
+  $('#prowlarr-interval').value = cfg.sync_interval_minutes || 60;
+
+  const pinned = state.meta.env_pinned || {};
+  [['url', '#prowlarr-url'], ['api_key', '#prowlarr-key'],
+   ['auto_sync', '#prowlarr-autosync'], ['sync_interval_minutes', '#prowlarr-interval']]
+    .forEach(([key, sel]) => {
+      const env = pinned[`prowlarr.${key}`];
+      $(sel).disabled = !!env;
+      $(sel).title = env ? `locked by ${env}, change it in your compose file` : '';
+    });
 }
 
 // --- settings ---------------------------------------------------------------

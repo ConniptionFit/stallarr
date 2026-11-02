@@ -301,8 +301,18 @@ nobody has written code for.
 (`********`) and announce passkeys are not stored there at all — Prowlarr
 searches, it does not seed. `integrations/prowlarr.py::_usable` drops masked
 values; never let one reach config, where it would look configured and fail
-every call. An unrecognised site is reported as unsupported rather than guessed
-at: it is only proposed as UNIT3D after `_speaks_unit3d` confirms it.
+every call. An unrecognised site is never guessed at: it is only proposed as
+UNIT3D after `_speaks_unit3d` confirms it, and otherwise comes in on the
+`generic` base, which makes no site calls but routes its torrents by announce
+host. A `generic` verdict never demotes a tracker already on `unit3d` (one failed
+probe is not evidence), and `rsskey` is not mapped to `passkey` because they are
+different secrets and the auto-sync overwrites.
+
+With `prowlarr.auto_sync` on, `service._prowlarr_loop` re-syncs every
+`sync_interval_minutes` (floored at `MIN_PROWLARR_SYNC_MINUTES`) on its own task,
+not in the scan. A sync that changed config saves and calls
+`reload(sync_prowlarr=False)`; reload otherwise syncs too, so passing True after
+a sync repeats every probe.
 
 ## Working on it
 

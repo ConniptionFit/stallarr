@@ -533,10 +533,13 @@ def build_router() -> APIRouter:
                 enable=payload.get("enable", True),
             )
         except prowlarr_module.ProwlarrError as exc:
+            service.record_prowlarr_sync(error=str(exc))
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
+        service.record_prowlarr_sync(result=result)
         config_module.save(cfg)
-        await service.reload()
+        # Just synced; letting reload sync again would repeat every probe.
+        await service.reload(sync_prowlarr=False)
         result["ok"] = True
         result["config"] = _redact_config(service.cfg)
         return result
@@ -567,7 +570,11 @@ def _prowlarr_cfg(cfg: Config, payload: dict) -> config_module.ProwlarrConfig:
     if not api_key or api_key == "__SET__":
         api_key = cfg.prowlarr.api_key
     return config_module.ProwlarrConfig(
-        enabled=True, url=url, api_key=api_key, auto_sync=cfg.prowlarr.auto_sync
+        enabled=True,
+        url=url,
+        api_key=api_key,
+        auto_sync=cfg.prowlarr.auto_sync,
+        sync_interval_minutes=cfg.prowlarr.sync_interval_minutes,
     )
 
 

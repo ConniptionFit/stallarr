@@ -238,8 +238,19 @@ class ProwlarrConfig(BaseModel):
     enabled: bool = False
     url: str = ""
     api_key: str = ""
-    #: Re-import on every config reload, so rotated keys land without a click.
+    #: Re-import at startup, on every config save, and every
+    #: `sync_interval_minutes`, so new trackers and rotated keys land without a
+    #: click. Overwrites API keys and URLs with Prowlarr's; never touches
+    #: passkeys or cookies, which Prowlarr cannot supply.
     auto_sync: bool = False
+    #: Floored at MIN_PROWLARR_SYNC_MINUTES. Each run is one Prowlarr call plus
+    #: one probe per site not yet confirmed as UNIT3D.
+    sync_interval_minutes: int = 60
+
+
+#: Probing unconfirmed sites is a request to a private tracker per run, so the
+#: recurring sync is not allowed to run hot whatever the config says.
+MIN_PROWLARR_SYNC_MINUTES = 15
 
 
 class NotifyConfig(BaseModel):
@@ -420,6 +431,8 @@ _ENV_MAP = {
     "PROWLARR_URL": "prowlarr.url",
     "PROWLARR_API_KEY": "prowlarr.api_key",
     "PROWLARR_ENABLED": "prowlarr.enabled",
+    "PROWLARR_AUTO_SYNC": "prowlarr.auto_sync",
+    "PROWLARR_SYNC_INTERVAL_MINUTES": "prowlarr.sync_interval_minutes",
 }
 
 #: Tracker fields settable per tracker as STALLARR_TRACKER_<ID>_<FIELD>.

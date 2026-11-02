@@ -100,9 +100,14 @@ class StallarrService:
         #: The ratio builder. Owns its own loop; see discovery/__init__.py.
         self.discovery = Discovery(self)
 
+        #: Outcome of the last Prowlarr sync, shown beside the Sync now button.
+        #: Empty until one has run.
+        self.prowlarr_sync: dict[str, Any] = {}
+
         self._scan_lock = asyncio.Lock()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._prowlarr_task: asyncio.Task | None = None
         self._stopping = False
 
     # --- lifecycle ------------------------------------------------------------
@@ -112,16 +117,21 @@ class StallarrService:
         await self._auto_sync_prowlarr()
         await self._build()
         self._task = asyncio.create_task(self._loop(), name="stallarr-scan-loop")
+        self._prowlarr_task = asyncio.create_task(
+            self._prowlarr_loop(), name="stallarr-prowlarr-sync"
+        )
         self.discovery.start()
 
     async def stop(self) -> None:
         self._stopping = True
         await self.discovery.stop()
         self._wake.set()
-        if self._task:
-            self._task.cancel()
+        for task in (self._task, self._prowlarr_task):
+            if not task:
+                continue
+            task.cancel()
             try:
-                await self._task
+                await task
             except asyncio.CancelledError:
                 pass
         await self._teardown()
@@ -153,15 +163,20 @@ class StallarrService:
 
         await self.refresh_tracker_status()
 
-    async def reload(self) -> None:
-        """Apply a saved config change without restarting the process."""
+    async def reload(self, *, sync_prowlarr: bool = True) -> None:
+        """Apply a saved config change without restarting the process.
+
+        `sync_prowlarr=False` is for callers that have just synced and saved:
+        syncing again would repeat the Prowlarr call and every probe for nothing.
+        """
         from .web import oidc
 
         self.cfg = config_module.load()
         # A corrected issuer must take effect on save, not an hour later when
         # the discovery cache happens to expire.
         oidc.forget_discovery()
-        await self._auto_sync_prowlarr()
+        if sync_prowlarr:
+            await self._auto_sync_prowlarr()
         await self.notifier.close()
         self.notifier = Notifier(self.cfg.notify, self.cfg.web.base_url)
         logging.getLogger("stallarr").setLevel(self.cfg.log_level.upper())
@@ -170,15 +185,16 @@ class StallarrService:
         # A changed tracker list or filter should show up now, not next hour.
         self.discovery.trigger()
 
-    async def _auto_sync_prowlarr(self) -> None:
-        """Refresh tracker credentials from Prowlarr, if that is switched on.
+    async def _auto_sync_prowlarr(self) -> bool:
+        """Pull new trackers and refreshed keys from Prowlarr, if switched on.
 
         Best-effort by design: Prowlarr being down must never stop stallarr from
-        starting with the credentials it already has.
+        starting with the credentials it already has. Returns True when config
+        changed (and was saved), so the caller knows plugins need rebuilding.
         """
         prowlarr_cfg = self.cfg.prowlarr
         if not (prowlarr_cfg.enabled and prowlarr_cfg.auto_sync and prowlarr_cfg.url):
-            return
+            return False
 
         from .integrations import prowlarr
 
@@ -186,19 +202,65 @@ class StallarrService:
             result = await prowlarr.sync(self.cfg, overwrite=True)
         except prowlarr.ProwlarrError as exc:
             log.warning("Prowlarr auto-sync skipped: %s", exc)
-            return
-        except Exception:
+            self.record_prowlarr_sync(error=str(exc), trigger="auto")
+            return False
+        except Exception as exc:
             log.exception("Prowlarr auto-sync failed")
-            return
+            self.record_prowlarr_sync(error=f"sync failed: {exc}", trigger="auto")
+            return False
 
+        self.record_prowlarr_sync(result=result, trigger="auto")
         changed = [item for item in result["imported"] if item["changed"]]
-        if changed:
-            config_module.save(self.cfg)
-            log.info(
-                "Prowlarr auto-sync updated %d tracker(s): %s",
-                len(changed),
-                ", ".join(item["tracker_id"] for item in changed),
+        if not changed:
+            return False
+        config_module.save(self.cfg)
+        log.info(
+            "Prowlarr auto-sync: %d added, %d updated (%s)",
+            len(result["added"]),
+            len(result["updated"]),
+            ", ".join(item["tracker_id"] for item in changed),
+        )
+        return True
+
+    def record_prowlarr_sync(
+        self,
+        *,
+        result: dict[str, Any] | None = None,
+        error: str = "",
+        trigger: str = "manual",
+    ) -> None:
+        """Remember how the last sync went. Ids and counts only, never secrets."""
+        result = result or {}
+        self.prowlarr_sync = {
+            "at": time.time(),
+            "trigger": trigger,
+            "ok": not error,
+            "error": error,
+            "added": list(result.get("added", [])),
+            "updated": list(result.get("updated", [])),
+            "skipped": [item["tracker_id"] for item in result.get("skipped", [])],
+            "total": len(result.get("proposals", [])),
+        }
+
+    async def _prowlarr_loop(self) -> None:
+        """Re-sync from Prowlarr on its own clock.
+
+        Separate from the scan loop: a sync is about config, not torrents, and
+        running it inside the scan would tie a Prowlarr timeout to scan latency.
+        Startup and every config save already sync, so this sleeps first.
+        """
+        while not self._stopping:
+            minutes = max(
+                self.cfg.prowlarr.sync_interval_minutes, config_module.MIN_PROWLARR_SYNC_MINUTES
             )
+            await asyncio.sleep(minutes * 60)
+            try:
+                if await self._auto_sync_prowlarr():
+                    await self.reload(sync_prowlarr=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Prowlarr sync loop iteration failed")
 
     def trigger_scan(self) -> None:
         """Ask the loop to scan now instead of waiting for the interval."""
@@ -795,6 +857,14 @@ class StallarrService:
             # Trackers where deletion is currently refused, and on what evidence.
             "deletion_blocks": self.deletion_blocks,
             "disk": self.disk,
+            "prowlarr": {
+                "auto_sync": self.cfg.prowlarr.enabled and self.cfg.prowlarr.auto_sync,
+                "interval_minutes": max(
+                    self.cfg.prowlarr.sync_interval_minutes,
+                    config_module.MIN_PROWLARR_SYNC_MINUTES,
+                ),
+                "last": self.prowlarr_sync,
+            },
         }
 
     async def dashboard(self) -> dict[str, Any]:
