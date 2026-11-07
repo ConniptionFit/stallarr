@@ -50,6 +50,16 @@ SEEDING_WINDOW_DAYS = 7
 #: now rather than the torrent's whole history.
 RECENTLY_RECOVERED_DAYS = 7
 
+#: How long a tracker's account figures and freeleech list are reused for the
+#: dashboard. The UI refreshes every ten seconds while the Trackers or Seeding
+#: tab is open, and each refresh used to put a fresh API call on every site —
+#: hundreds an hour, from a page someone left open. Account totals move slowly
+#: enough that five minutes is still "now".
+DISPLAY_CACHE_SECONDS = 300
+#: A failed lookup is cached too, more briefly, so a site that is down is not
+#: retried on every refresh — that is the hammering a ban is made of.
+DISPLAY_CACHE_ERROR_SECONDS = 60
+
 
 @dataclass
 class ScanSummary:
@@ -103,6 +113,12 @@ class StallarrService:
         #: Outcome of the last Prowlarr sync, shown beside the Sync now button.
         #: Empty until one has run.
         self.prowlarr_sync: dict[str, Any] = {}
+
+        #: (kind, tracker id) -> (plugin, expires, ok, value-or-error). The
+        #: plugin object is part of the entry so a reload, which builds new
+        #: plugins, invalidates everything without a hook of its own.
+        self._display_cache: dict[tuple[str, str], tuple[Any, float, bool, Any]] = {}
+        self._display_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
         self._scan_lock = asyncio.Lock()
         self._wake = asyncio.Event()
@@ -514,18 +530,48 @@ class StallarrService:
         `_seeding_requirements`: this feeds a dashboard view, not recovery, so
         a sick tracker must not break the page.
         """
-        out: dict[str, dict[str, TrackerFreeleechEntry]] = {}
-        for plugin in self.router.plugins.values():
-            if not plugin.can(Capability.FREELEECH_STATUS):
-                continue
+        plugins = [p for p in self.router.plugins.values() if p.can(Capability.FREELEECH_STATUS)]
+
+        async def one(plugin) -> list[TrackerFreeleechEntry]:
             try:
-                rows = await plugin.freeleech_status()
+                return await self._display_call("freeleech", plugin, plugin.freeleech_status)
             except Exception as exc:  # noqa: BLE001 - a sick tracker must not break the view
                 log.warning("%s: could not read freeleech status: %s", plugin.id, exc)
-                continue
-            if rows:
-                out[plugin.id] = {normalise_release(r.name): r for r in rows}
-        return out
+                return []
+
+        # Concurrent across trackers: each plugin keeps its own rate limit, so
+        # this only stops one slow site from holding up the others.
+        results = await asyncio.gather(*(one(p) for p in plugins))
+        return {
+            plugin.id: {normalise_release(r.name): r for r in rows}
+            for plugin, rows in zip(plugins, results, strict=True)
+            if rows
+        }
+
+    async def _display_call(self, kind: str, plugin: Any, fetch: Any) -> Any:
+        """`fetch()` for a dashboard view, reused for `DISPLAY_CACHE_SECONDS`.
+
+        Only for display data. Nothing in the scan goes through here: recovery
+        decisions must never act on a five-minute-old answer.
+        """
+        key = (kind, plugin.id)
+        lock = self._display_locks.setdefault(key, asyncio.Lock())
+        # Serialised per key, so two browser tabs refreshing together make one
+        # call between them rather than one each.
+        async with lock:
+            hit = self._display_cache.get(key)
+            now = time.monotonic()
+            if hit and hit[0] is plugin and now < hit[1]:
+                if hit[2]:
+                    return hit[3]
+                raise hit[3]
+            try:
+                value = await fetch()
+            except Exception as exc:
+                self._display_cache[key] = (plugin, now + DISPLAY_CACHE_ERROR_SECONDS, False, exc)
+                raise
+            self._display_cache[key] = (plugin, now + DISPLAY_CACHE_SECONDS, True, value)
+            return value
 
     async def _record_obligations(
         self, requirements: dict[str, dict[str, SeedingRequirement]], answered: set[str]
@@ -873,12 +919,20 @@ class StallarrService:
         Kept separate from `snapshot()` so that stays synchronous and cheap for
         every other caller.
         """
+        # Independent reads, each on its own worker thread: run them together
+        # rather than paying four round trips on every ten-second refresh.
+        seeding, deletions, repairs, condemned = await asyncio.gather(
+            self.seeding_metrics(),
+            db.deletion_totals(SEEDING_WINDOW_DAYS),
+            db.repair_stats(SEEDING_WINDOW_DAYS),
+            self.pending_deletions(),
+        )
         return {
             **self.snapshot(),
-            "seeding": await self.seeding_metrics(),
-            "deletions": await db.deletion_totals(SEEDING_WINDOW_DAYS),
-            "repairs": await db.repair_stats(SEEDING_WINDOW_DAYS),
-            "condemned": await self.pending_deletions(),
+            "seeding": seeding,
+            "deletions": deletions,
+            "repairs": repairs,
+            "condemned": condemned,
         }
 
     async def pending_deletions(self) -> list[dict[str, Any]]:
@@ -944,7 +998,23 @@ class StallarrService:
         library = {row["tracker"]: row for row in self.library.get("by_tracker", [])}
         out: dict[str, Any] = {}
 
-        for plugin_id, plugin in self.router.plugins.items():
+        plugins = list(self.router.plugins.items())
+
+        async def account(plugin) -> tuple[Any, str | None]:
+            if not plugin.can(Capability.USER_STATS):
+                return None, None
+            try:
+                return await self._display_call("user_stats", plugin, plugin.user_stats), None
+            except TrackerError as exc:
+                return None, str(exc)
+            except Exception as exc:  # noqa: BLE001 - one broken site must not blank every card
+                log.warning("%s: could not read account stats: %s", plugin.id, exc)
+                return None, f"unexpected error: {exc}"
+
+        # One call per site, concurrently and cached: see DISPLAY_CACHE_SECONDS.
+        accounts = await asyncio.gather(*(account(plugin) for _, plugin in plugins))
+
+        for (plugin_id, plugin), (stats, error) in zip(plugins, accounts, strict=True):
             entry: dict[str, Any] = {
                 "name": plugin.name,
                 "local_seeding": local.get(plugin_id, 0),
@@ -953,40 +1023,36 @@ class StallarrService:
                 # account figure above it and must not be read as one.
                 "local": library.get(plugin_id),
             }
+            if error is not None:
+                entry["error"] = error
 
-            if plugin.can(Capability.USER_STATS):
-                try:
-                    stats = await plugin.user_stats()
-                except TrackerError as exc:
-                    entry["error"] = str(exc)
-                    stats = None
-                if stats:
-                    entry.update(
-                        {
-                            "uploaded": stats.uploaded,
-                            "downloaded": stats.downloaded,
-                            "ratio": stats.ratio,
-                            "bonus": stats.bonus,
-                            "hit_and_runs": stats.hit_and_runs,
-                            "seeding": stats.seeding,
-                        }
-                    )
-                    if stats.seeding is not None:
-                        entry["unseen_seeds"] = max(entry["local_seeding"] - stats.seeding, 0)
-                    tracker_cfg = self.cfg.trackers.get(plugin_id)
-                    floor = getattr(tracker_cfg, "min_ratio", 0.0) or 0.0
-                    # Which floor the headroom was measured against, so a
-                    # number with no floor configured is not mistaken for one
-                    # measured against a rule the user set.
-                    entry["ratio_floor"] = floor if floor > 0 else 1.0
-                    entry["ratio_floor_configured"] = floor > 0
-                    entry["headroom"] = download_headroom(stats.uploaded, stats.downloaded, floor)
-                    entry["buffer"] = (
-                        stats.uploaded - stats.downloaded
-                        if stats.uploaded is not None and stats.downloaded is not None
-                        else None
-                    )
-                    entry["warnings"] = _account_warnings(stats, tracker_cfg)
+            if stats:
+                entry.update(
+                    {
+                        "uploaded": stats.uploaded,
+                        "downloaded": stats.downloaded,
+                        "ratio": stats.ratio,
+                        "bonus": stats.bonus,
+                        "hit_and_runs": stats.hit_and_runs,
+                        "seeding": stats.seeding,
+                    }
+                )
+                if stats.seeding is not None:
+                    entry["unseen_seeds"] = max(entry["local_seeding"] - stats.seeding, 0)
+                tracker_cfg = self.cfg.trackers.get(plugin_id)
+                floor = getattr(tracker_cfg, "min_ratio", 0.0) or 0.0
+                # Which floor the headroom was measured against, so a
+                # number with no floor configured is not mistaken for one
+                # measured against a rule the user set.
+                entry["ratio_floor"] = floor if floor > 0 else 1.0
+                entry["ratio_floor_configured"] = floor > 0
+                entry["headroom"] = download_headroom(stats.uploaded, stats.downloaded, floor)
+                entry["buffer"] = (
+                    stats.uploaded - stats.downloaded
+                    if stats.uploaded is not None and stats.downloaded is not None
+                    else None
+                )
+                entry["warnings"] = _account_warnings(stats, tracker_cfg)
 
             out[plugin_id] = entry
         return out

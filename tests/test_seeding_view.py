@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from conftest import make_torrent
+
 from stallarr import db
 from stallarr.config import Config, TrackerConfig
 from stallarr.models import Torrent, TorrentState, TrackerEntry, TrackerFreeleechEntry
@@ -50,7 +50,7 @@ class FakeFreeleechPlugin(TrackerPlugin):
         return self._entries
 
 
-def seeding_torrent(name: str, *, infohash: str, **overrides) -> "Torrent":
+def seeding_torrent(name: str, *, infohash: str, **overrides) -> Torrent:
     return make_torrent(
         name=name,
         infohash=infohash,
@@ -154,3 +154,91 @@ async def test_no_history_means_not_recently_recovered():
     view = await svc.seeding_view()
 
     assert view["trackers"]["faketracker"][0]["recently_recovered"] is False
+
+
+class CountingFreeleechPlugin(FakeFreeleechPlugin):
+    def __init__(self, entries=()):
+        super().__init__(entries)
+        self.calls = 0
+
+    async def freeleech_status(self):
+        self.calls += 1
+        return self._entries
+
+
+async def test_freeleech_lookups_are_cached_across_refreshes():
+    """The Seeding tab refreshes every ten seconds. Each refresh must not be a
+    fresh call to every tracker — that is exactly the hammering private sites
+    ban for."""
+    torrents = [seeding_torrent("Some.Release-GRP", infohash="c" * 40)]
+    plugin = CountingFreeleechPlugin(
+        entries=[TrackerFreeleechEntry(name="Some.Release-GRP", freeleech=True)]
+    )
+    svc = service(FakeClient(torrents), plugin)
+
+    for _ in range(3):
+        view = await svc.seeding_view()
+
+    assert plugin.calls == 1
+    assert view["trackers"]["faketracker"][0]["freeleech"] is True
+
+
+async def test_a_rebuilt_plugin_is_asked_again():
+    """A reload builds new plugin objects (new credentials, say); the cache
+    must not keep serving what the old ones said."""
+    torrents = [seeding_torrent("Some.Release-GRP", infohash="c" * 40)]
+    first = CountingFreeleechPlugin()
+    svc = service(FakeClient(torrents), first)
+    await svc.seeding_view()
+
+    second = CountingFreeleechPlugin()
+    svc.router = TrackerRouter({second.id: second})
+    await svc.seeding_view()
+
+    assert (first.calls, second.calls) == (1, 1)
+
+
+class StatsPlugin(TrackerPlugin):
+    id = "statstracker"
+    name = "StatsTracker"
+    hosts = ("statstracker.org",)
+
+    def __init__(self, fail=False):
+        super().__init__(TrackerConfig(enabled=True))
+        self.calls = 0
+        self.fail = fail
+
+    @property
+    def capabilities(self):
+        return frozenset({Capability.USER_STATS})
+
+    async def user_stats(self):
+        from stallarr.models import UserStats
+        from stallarr.trackers.base import TrackerError
+
+        self.calls += 1
+        if self.fail:
+            raise TrackerError("site is down")
+        return UserStats(uploaded=2048, downloaded=1024, ratio=2.0)
+
+
+async def test_account_stats_are_cached_across_refreshes():
+    plugin = StatsPlugin()
+    svc = service(FakeClient([]), plugin)
+
+    for _ in range(3):
+        stats = await svc.tracker_stats()
+
+    assert plugin.calls == 1
+    assert stats["statstracker"]["ratio"] == 2.0
+
+
+async def test_a_failing_site_is_not_retried_on_every_refresh():
+    plugin = StatsPlugin(fail=True)
+    svc = service(FakeClient([]), plugin)
+
+    for _ in range(3):
+        stats = await svc.tracker_stats()
+
+    assert plugin.calls == 1
+    assert stats["statstracker"]["error"] == "site is down"

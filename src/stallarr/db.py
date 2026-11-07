@@ -18,6 +18,8 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -207,7 +209,7 @@ def _resolve_journal_mode(conn: sqlite3.Connection) -> str:
     return "delete"
 
 
-def _connect() -> sqlite3.Connection:
+def _open_connection() -> sqlite3.Connection:
     global _journal_mode
 
     DB_DIR.mkdir(parents=True, exist_ok=True)
@@ -228,6 +230,23 @@ def _connect() -> sqlite3.Connection:
         conn.execute(f"PRAGMA journal_mode={_journal_mode}")
 
     return conn
+
+
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
+    """A connection that is committed (or rolled back) *and closed* on exit.
+
+    `sqlite3.Connection`'s own context manager only ends the transaction; it
+    never closes. Every call here opens a fresh connection, so relying on it
+    left one file handle per query waiting for the garbage collector (Python
+    3.13 reports each as a ResourceWarning).
+    """
+    conn = _open_connection()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _init_sync() -> None:
