@@ -110,6 +110,17 @@ const FRIENDLY = {
 const label = (text) => FRIENDLY[text]
   || String(text).replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
+/** A pill with its full text as the tooltip. Pills cut long text with an
+ *  ellipsis rather than spill out of their cell, so the title is how the rest
+ *  stays readable. */
+const pill = (text, cls = '') =>
+  `<span class="pill${cls ? ` ${cls}` : ''}" title="${esc(text)}">${esc(text)}</span>`;
+
+/** Long free text (an announce message, a client error) capped at two lines,
+ *  with the whole of it on hover. */
+const clamp = (text, cls = 'muted') =>
+  `<span class="clamp ${cls}" title="${esc(text)}">${esc(text)}</span>`;
+
 const pct = (fraction) => (fraction == null ? '—' : `${Math.round(fraction * 100)}%`);
 const rate = (n) => `${bytes(n)}/s`;
 const ratioText = (r) => (r == null ? '—' : r.toFixed(2));
@@ -152,7 +163,7 @@ async function boot() {
   renderHistoryFilter();
   await Promise.all([loadConfig(), loadPlugins()]);
   await refresh();
-  state.timer = setInterval(refresh, 10000);
+  state.timer = setInterval(tick, 10000);
 }
 
 $('#login-form').addEventListener('submit', async (event) => {
@@ -185,28 +196,69 @@ $$('.tab').forEach((tab) => tab.addEventListener('click', () => {
 
 // --- dashboard --------------------------------------------------------------
 
-async function refresh() {
+/** One refresh at a time. The timer fires every ten seconds whatever happens,
+ *  so a slow qBittorrent or tracker used to stack refreshes on top of each
+ *  other, each re-rendering the page under the one before. A request made
+ *  while one is running (a tab click, say) is queued and runs once after it. */
+let refreshing = null;
+let refreshQueued = false;
+
+function refresh() {
+  if (refreshing) {
+    refreshQueued = true;
+    return refreshing;
+  }
+  refreshing = refreshOnce().finally(() => {
+    refreshing = null;
+    if (refreshQueued) {
+      refreshQueued = false;
+      refresh();
+    }
+  });
+  return refreshing;
+}
+
+/** The timer's refresh: nothing while the browser tab is in the background.
+ *  Every refresh asks qBittorrent for its whole torrent list on the Torrents
+ *  and Seeding tabs; a dashboard left open in a hidden tab did that all day. */
+function tick() {
+  if (!document.hidden) refresh();
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.timer) refresh();
+});
+
+async function refreshOnce() {
   try {
     const status = await api('/status');
     state.issues = status.issues || [];
-    renderStats(status);
-    renderProblems(status);
-    renderRepairs(status.repairs || {});
-    renderLibrary(status.library || {});
-    renderIssues(state.issues);
     $('#dry-run-pill').hidden = !status.recovery.dry_run;
-    renderSeedingMetrics(status.seeding || {});
-    renderSeedingUnmatched(status.seeding_unmatched || []);
-    renderBreakers(status.deletion_blocks || []);
-    renderCondemned(status.condemned || []);
 
-    if (state.activeTab === 'dashboard') await loadTrend();
+    // Rebuilding the dashboard's tables while another tab is showing is pure
+    // DOM churn: clicking back to it calls refresh() first anyway.
+    if (state.activeTab === 'dashboard') {
+      renderStats(status);
+      renderProblems(status);
+      renderRepairs(status.repairs || {});
+      renderLibrary(status.library || {});
+      renderIssues(state.issues);
+      renderSeedingMetrics(status.seeding || {});
+      renderSeedingUnmatched(status.seeding_unmatched || []);
+      renderBreakers(status.deletion_blocks || []);
+      renderCondemned(status.condemned || []);
+      await loadTrend();
+    }
     if (state.activeTab === 'torrents') await loadTorrents();
     if (state.activeTab === 'history') await loadHistory();
     if (state.activeTab === 'deletions') await loadDeletions();
     if (state.activeTab === 'logs') await loadLogs();
     if (state.activeTab === 'trackers') {
-      renderPlugins(status);
+      // Rebuilding the form under someone typing into it steals focus and the
+      // caret, and rebuilding the picker closes it mid-choice. The live status
+      // badge can wait for the next refresh.
+      const editing = document.activeElement
+        && document.activeElement.closest('#plugin-detail, #tracker-picker');
+      if (!editing) renderPlugins(status);
       renderProwlarrLast(status.prowlarr);
       await loadTrackerStats();
     }
@@ -232,7 +284,7 @@ function renderSeedingMetrics(metrics) {
   $('#seeding-window').textContent = `counts cover the last ${metrics.window_days} days`;
   $('#seeding-metrics-body').innerHTML = rows.map((r) => `
     <tr>
-      <td><span class="pill">${esc(r.tracker_name || r.tracker)}</span></td>
+      <td>${pill(r.tracker_name || r.tracker)}</td>
       <td>${r.outstanding ? `<strong>${r.outstanding}</strong>` : '0'}</td>
       <td class="muted">${r.working}</td>
       <td class="muted">${r.seen}</td>
@@ -260,11 +312,11 @@ function renderBreakers(blocks) {
 
   $('#breaker-body').innerHTML = blocks.map((b) => `
     <tr>
-      <td><span class="pill">${esc(b.tracker)}</span></td>
+      <td>${pill(b.tracker)}</td>
       <td>${b.condemned}${b.total ? ` of ${b.total}` : ''}</td>
       <td><strong>${b.fraction === null ? '—' : `${(b.fraction * 100).toFixed(0)}%`}</strong></td>
       <td class="muted">${(b.limit * 100).toFixed(0)}%</td>
-      <td class="muted">${esc(b.reason)}</td>
+      <td class="text">${clamp(b.reason)}</td>
     </tr>`).join('');
 }
 
@@ -280,10 +332,10 @@ function renderCondemned(rows) {
   $('#condemned-body').innerHTML = rows.map((r) => `
     <tr>
       <td class="name">${esc(r.name)}</td>
-      <td><span class="pill">${esc(r.tracker_name || r.tracker)}</span></td>
-      <td>${bytes(r.size)}</td>
-      <td class="muted">${ago(r.first_at)}</td>
-      <td class="muted">${esc(r.status)}</td>
+      <td>${pill(r.tracker_name || r.tracker)}</td>
+      <td class="num">${bytes(r.size)}</td>
+      <td class="muted num">${ago(r.first_at)}</td>
+      <td class="muted text">${esc(r.status)}</td>
       <td class="actions">
         <button class="tiny" data-keep="${esc(r.infohash)}" data-name="${esc(r.name)}">Keep</button>
       </td>
@@ -396,9 +448,9 @@ function renderSeedingUnmatched(rows) {
   if (!rows.length) return;
   $('#seeding-unmatched-body').innerHTML = rows.map((r) => `
     <tr>
-      <td><span class="pill">${esc(r.tracker)}</span></td>
-      <td>${esc(r.name)}</td>
-      <td><span class="muted">${esc(r.detail)}</span></td>
+      <td>${pill(r.tracker)}</td>
+      <td class="name">${esc(r.name)}</td>
+      <td class="text">${clamp(r.detail)}</td>
     </tr>`).join('');
 }
 
@@ -600,7 +652,7 @@ function renderRepairs(repairs) {
   $('#repairs-body').innerHTML = rows.length
     ? rows.map((r) => `
       <tr>
-        <td><span class="pill">${esc(label(r.action))}</span></td>
+        <td>${pill(label(r.action))}</td>
         <td>${r.attempts}</td>
         <td>${r.succeeded} <span class="muted">(${pct(r.success_rate)})</span></td>
         <td>${r.failed ? `<strong>${r.failed}</strong>` : '<span class="muted">0</span>'}</td>
@@ -617,14 +669,14 @@ function renderLibrary(lib) {
   const totalUp = lib.uploaded || 0;
   $('#library-body').innerHTML = rows.map((r) => `
     <tr>
-      <td><span class="pill">${esc(r.tracker_name || r.tracker)}</span></td>
+      <td>${pill(r.tracker_name || r.tracker)}</td>
       <td>${r.torrents}</td>
       <td>${r.seeding}${r.stopped ? ` <span class="muted">· ${r.stopped} stopped</span>` : ''}</td>
       <td>${r.uploading ? `<strong>${r.uploading}</strong>` : '<span class="muted">0</span>'}</td>
-      <td>${bytes(r.uploaded)}</td>
-      <td class="muted">${bytes(r.downloaded)}</td>
-      <td>${ratioText(r.ratio)}</td>
-      <td class="muted">${rate(r.upspeed)}</td>
+      <td class="num">${bytes(r.uploaded)}</td>
+      <td class="muted num">${bytes(r.downloaded)}</td>
+      <td class="num">${ratioText(r.ratio)}</td>
+      <td class="muted num">${rate(r.upspeed)}</td>
       <td>${totalUp ? pct(r.uploaded / totalUp) : '—'}</td>
     </tr>`).join('');
 }
@@ -643,13 +695,13 @@ function renderIssues(issues) {
 
 function rowForIssue(item) {
   const findings = item.findings.map((f) =>
-    `<div><span class="pill">${esc(label(f.ailment))}</span> <span class="muted">${esc(f.detail)}</span></div>`).join('');
+    `<div class="finding-line">${pill(label(f.ailment))} ${clamp(f.detail)}</div>`).join('');
   return `
     <tr>
       <td><span class="dot ${SEV[item.severity] || 'info'}" title="${esc(item.severity_name)}"></span></td>
       <td class="name"><a href="#" data-detail="${esc(item.infohash)}">${esc(item.name)}</a></td>
-      <td>${findings}</td>
-      <td>${item.tracker ? `<span class="pill">${esc(item.tracker)}</span>` : '<span class="muted">unmatched</span>'}</td>
+      <td class="text">${findings}</td>
+      <td>${item.tracker ? `${pill(item.tracker)}` : '<span class="muted">unmatched</span>'}</td>
       <td class="actions">
         <button class="tiny" data-repair="${esc(item.infohash)}">Repair</button>
         <button class="tiny" data-reset="${esc(item.infohash)}">Reset</button>
@@ -669,23 +721,37 @@ function wireRowActions(root) {
     refresh();
   }));
 
+  // These used to await with no catch: a failed call left an unhandled
+  // rejection in the console and no word to the user.
   $$('[data-reset]', root).forEach((btn) => btn.addEventListener('click', async () => {
-    await api(`/torrents/${btn.dataset.reset}/reset`, { method: 'POST' });
-    toast('Recovery ladder reset', 'good');
+    btn.disabled = true;
+    try {
+      await api(`/torrents/${btn.dataset.reset}/reset`, { method: 'POST' });
+      toast('Recovery ladder reset', 'good');
+    } catch (err) { toast(err.message, 'bad'); }
+    btn.disabled = false;
     refresh();
   }));
 
   $$('[data-ignore]', root).forEach((btn) => btn.addEventListener('click', async () => {
-    await api(`/torrents/${btn.dataset.ignore}/ignore`, { method: 'POST', body: JSON.stringify({}) });
-    toast('Torrent ignored', 'good');
+    btn.disabled = true;
+    try {
+      await api(`/torrents/${btn.dataset.ignore}/ignore`, { method: 'POST', body: JSON.stringify({}) });
+      toast('Torrent ignored', 'good');
+    } catch (err) { toast(err.message, 'bad'); }
+    btn.disabled = false;
     refresh();
   }));
 }
 
 $('#scan-now').addEventListener('click', async () => {
-  const res = await api('/scan', { method: 'POST' });
-  toast(res.detail, 'good');
-  setTimeout(refresh, 1500);
+  try {
+    const res = await api('/scan', { method: 'POST' });
+    toast(res.detail, 'good');
+    setTimeout(refresh, 1500);
+  } catch (err) {
+    if (err.message !== 'authentication required') toast(err.message, 'bad');
+  }
 });
 
 // --- torrents ---------------------------------------------------------------
@@ -780,8 +846,8 @@ function renderTorrents() {
 
 function torrentRow(t) {
   const notes = t.skipped
-    ? `<span class="muted">skipped: ${esc(t.skipped)}</span>`
-    : t.findings.map((f) => `<span class="pill">${esc(label(f.ailment))}</span>`).join(' ')
+    ? clamp(`skipped: ${t.skipped}`)
+    : t.findings.map((f) => `${pill(label(f.ailment))}`).join(' ')
       || '<span class="pill ok">healthy</span>';
   const checked = state.selected.has(t.infohash) ? ' checked' : '';
   return `
@@ -790,11 +856,11 @@ function torrentRow(t) {
       <td><span class="dot ${SEV[t.severity] || 'ok'}"></span></td>
       <td class="name"><a href="#" data-detail="${esc(t.infohash)}">${esc(t.name)}</a>
           <div class="muted">${bytes(t.size)}</div></td>
-      <td><span class="pill">${esc(t.raw_state)}</span></td>
+      <td>${pill(t.raw_state)}</td>
       <td><div class="bar"><i style="width:${(t.progress * 100).toFixed(1)}%"></i></div>
           <span class="muted">${(t.progress * 100).toFixed(1)}%</span></td>
-      <td>${t.ratio.toFixed(2)}</td>
-      <td>${t.tracker ? esc(t.tracker) : `<span class="muted">${esc(t.tracker_hosts[0] || '—')}</span>`}</td>
+      <td class="num">${t.ratio.toFixed(2)}</td>
+      <td class="text">${t.tracker ? esc(t.tracker) : `<span class="muted">${esc(t.tracker_hosts[0] || '—')}</span>`}</td>
       <td>${notes}</td>
       <td class="actions"><button class="tiny" data-repair="${esc(t.infohash)}">Repair</button></td>
     </tr>`;
@@ -943,7 +1009,7 @@ function renderSeeding() {
 function seedingRow(r) {
   const tagPills = (r.tags || [])
     .filter((t) => t.startsWith('stallarr:'))
-    .map((t) => `<span class="pill">${esc(label(t.replace('stallarr:', '')))}</span>`);
+    .map((t) => `${pill(label(t.replace('stallarr:', '')))}`);
   const notes = [
     r.recently_recovered ? '<span class="pill ok">recovered</span>' : '',
     ...tagPills,
@@ -956,10 +1022,10 @@ function seedingRow(r) {
   return `
     <tr>
       <td class="name">${esc(r.name)}</td>
-      <td><span class="pill">${esc(r.tracker_name || r.tracker)}</span></td>
-      <td>${r.ratio.toFixed(2)}</td>
-      <td>${bytes(r.uploaded)}</td>
-      <td>${duration(r.seeding_time)}</td>
+      <td>${pill(r.tracker_name || r.tracker)}</td>
+      <td class="num">${r.ratio.toFixed(2)}</td>
+      <td class="num">${bytes(r.uploaded)}</td>
+      <td class="num">${duration(r.seeding_time)}</td>
       <td>${freeleech}</td>
       <td>${notes}</td>
     </tr>`;
@@ -984,7 +1050,7 @@ async function loadDiscover() {
     : (d.running ? 'browsing…' : '');
 
   const status = Object.entries(d.status || {}).map(([id, s]) =>
-    `<span class="pill ${s.ok ? 'ok' : 'bad'}" title="${esc(s.detail || '')}">${esc(s.name || id)}: ${esc(s.detail || '')}</span>`);
+    `<span class="pill wrap ${s.ok ? 'ok' : 'bad'}">${esc(s.name || id)}: ${esc(s.detail || '')}</span>`);
   if (!d.enabled) {
     $('#discover-status').innerHTML = 'Off. Turn it on and pick trackers under <b>Settings, Ratio builder</b>.';
   } else if (!d.trackers.length) {
@@ -1049,13 +1115,13 @@ function renderDiscover() {
     return `
       <tr>
         <td class="name">${esc(c.name)}</td>
-        <td><span class="pill">${esc(c.tracker)}</span></td>
+        <td>${pill(c.tracker)}</td>
         <td title="${esc(why)}"><b>${c.score.toFixed(2)}</b></td>
         <td>${esc(c.strategy)}</td>
         <td>${c.seeders ?? '?'} / ${c.leechers ?? '?'}</td>
         <td>${p.snatches_per_day ?? '—'}</td>
         <td>${p.age_days >= 0 ? `${p.age_days}d` : '—'}</td>
-        <td>${c.size ? bytes(c.size) : '—'}</td>
+        <td class="num">${c.size ? bytes(c.size) : '—'}</td>
         <td>${fl} ${extras}</td>
         <td><button class="tiny" data-grab="${esc(c.tracker)}|${esc(c.torrent_id)}"
              ${canGrab ? '' : 'disabled title="Set a disk budget in Settings first"'}>Grab</button></td>
@@ -1087,10 +1153,10 @@ function renderGrabs(grabs) {
   }
   body.innerHTML = grabs.map((g) => `
     <tr>
-      <td class="muted">${ago(g.grabbed_at)}</td>
+      <td class="muted num">${ago(g.grabbed_at)}</td>
       <td class="name">${esc(g.name)}</td>
-      <td><span class="pill">${esc(g.tracker)}</span></td>
-      <td>${bytes(g.size)}</td>
+      <td>${pill(g.tracker)}</td>
+      <td class="num">${bytes(g.size)}</td>
       <td>${Number(g.score).toFixed(2)}</td>
       <td>${esc(g.strategy)}</td>
     </tr>`).join('');
@@ -1132,7 +1198,7 @@ function openDrawer(infohash) {
 
   const findings = (t.findings || []).map((f) => `
     <div class="finding">
-      <span class="pill">${esc(label(f.ailment))}</span>
+      ${pill(label(f.ailment))}
       <span class="muted">${esc(f.detail)}</span>
     </div>`).join('') || '<p class="muted">Nothing wrong with this one.</p>';
 
@@ -1175,16 +1241,16 @@ async function loadDeletions() {
   }
   body.innerHTML = deletions.map((d) => `
     <tr>
-      <td class="muted">${ago(d.deleted_at)}</td>
+      <td class="muted num">${ago(d.deleted_at)}</td>
       <td class="name">${esc(d.name)}</td>
-      <td><span class="pill">${esc(d.tracker)}</span></td>
-      <td>${bytes(d.size)}</td>
+      <td>${pill(d.tracker)}</td>
+      <td class="num">${bytes(d.size)}</td>
       <td>${d.files_deleted
         ? '<span class="pill warn">erased</span>'
         : '<span class="pill">entry only</span>'}</td>
-      <td class="muted">${esc(d.reason)}</td>
-      <td class="muted">${d.export_path
-        ? `<code>${esc(d.export_path.split('/').pop())}</code>`
+      <td class="text">${clamp(d.reason)}</td>
+      <td class="muted text">${d.export_path
+        ? `<code title="${esc(d.export_path)}">${esc(d.export_path.split('/').pop())}</code>`
         : '—'}</td>
     </tr>`).join('');
 }
@@ -1224,11 +1290,11 @@ async function loadHistory() {
   }
   body.innerHTML = history.map((h) => `
     <tr>
-      <td class="muted">${ago(h.ts)}</td>
+      <td class="muted num">${ago(h.ts)}</td>
       <td class="name">${esc(h.name)}</td>
-      <td><span class="pill">${esc(label(h.ailment || '—'))}</span></td>
-      <td><span class="pill">${esc(label(h.action || '—'))}</span>${h.dry_run ? ' <span class="pill warn">dry run</span>' : ''}</td>
-      <td><span class="pill ${h.ok ? 'ok' : 'bad'}">${h.ok ? 'ok' : 'failed'}</span> <span class="muted">${esc(h.message)}</span></td>
+      <td>${pill(label(h.ailment || '—'))}</td>
+      <td>${pill(label(h.action || '—'))}${h.dry_run ? ' <span class="pill warn">dry run</span>' : ''}</td>
+      <td class="text"><span class="pill ${h.ok ? 'ok' : 'bad'}">${h.ok ? 'ok' : 'failed'}</span> ${clamp(h.message)}</td>
     </tr>`).join('');
 }
 
@@ -1304,10 +1370,10 @@ function renderTrackerDetail(trackerStatus = {}) {
   const cfg = trackerValues(plugin.id);
   const live = trackerStatus[plugin.id] || plugin.status;
   const badge = live
-    ? `<span class="pill ${live.ok ? 'ok' : 'bad'}">${esc(live.detail || (live.ok ? 'ok' : 'error'))}</span>`
+    ? `<span class="pill wrap ${live.ok ? 'ok' : 'bad'}">${esc(live.detail || (live.ok ? 'ok' : 'error'))}</span>`
     : '<span class="pill">not connected</span>';
   const caps = (live && live.capabilities ? live.capabilities : plugin.capabilities)
-    .map((c) => `<span class="pill">${esc(label(c))}</span>`).join(' ')
+    .map((c) => `${pill(label(c))}`).join(' ')
     || '<span class="muted">no capabilities — add credentials below</span>';
   const origin = plugin.builtin
     ? `<span class="muted">plugin file · ${esc(plugin.hosts.join(', ') || 'no hosts')}</span>`
@@ -1555,10 +1621,10 @@ function renderProposals(proposals) {
       : '<span class="pill warn">no credentials available</span>';
     return `
       <tr>
-        <td><span class="pill ${cls}">${esc(p.tracker_id)}</span></td>
+        <td>${pill(p.tracker_id, cls)}</td>
         <td class="name">${esc(p.name)}<div class="muted">${esc(p.url)}</div></td>
         <td>${provides}</td>
-        <td class="muted">${esc(p.detail)}</td>
+        <td class="text">${clamp(p.detail)}</td>
       </tr>`;
   }).join('');
 
@@ -1892,10 +1958,22 @@ $('#log-level').addEventListener('change', loadLogs);
 async function loadLogs() {
   const level = $('#log-level').value;
   const { logs } = await api(`/logs?limit=300${level ? `&level=${level}` : ''}`);
-  $('#log-console').innerHTML = logs.map((l) => {
+  const el = $('#log-console');
+  // Selecting text to copy an error out is the main thing people do here, and
+  // replacing the content every ten seconds threw the selection away.
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && el.contains(selection.anchorNode)) return;
+  const html = logs.map((l) => {
     const time = new Date(l.ts * 1000).toLocaleTimeString();
     return `<span class="log-${esc(l.level)}">${time}  ${esc(l.level.padEnd(7))} ${esc(l.logger)}: ${esc(l.message)}</span>`;
   }).join('\n') || '<span class="muted">No log entries yet.</span>';
+  if (el._html === html) return;
+  el._html = html;
+  // Newest is at the top. Someone scrolled down reading older lines keeps
+  // their place instead of being thrown back to the top on every refresh.
+  const { scrollTop } = el;
+  el.innerHTML = html;
+  el.scrollTop = scrollTop;
 }
 
 boot().catch((err) => {
