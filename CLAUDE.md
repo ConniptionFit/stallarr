@@ -173,6 +173,12 @@ torrents get enriched per scan is a ban risk, not just a slowdown. Torrents
 already escalated are skipped (`service._already_escalated`) — they will never
 be repaired again, so the call buys nothing.
 
+**Dashboard views that call a tracker are cached** (`service._display_call`,
+`DISPLAY_CACHE_SECONDS`). The UI refreshes every ten seconds, so account stats
+and freeleech lists read live would put a call on every site per refresh while
+a tab sits open. Failures are cached too, for less time. Never route anything
+the scan decides on through that cache.
+
 **Except one question, which is still worth asking: does it still exist?**
 Sites delete superseded torrents, and one deleted *after* stallarr gave up on it
 keeps whatever stale diagnosis it had — permanently, since nothing re-examines
