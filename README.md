@@ -1,6 +1,12 @@
-# stallarr
+<p align="center">
+  <img src="assets/stallarr.png" alt="stallarr icon: a shield with a heartbeat that climbs into an upload arrow" width="128" height="128">
+</p>
 
-🛟 **stallarr** watches your torrents for stalls, tracker errors and dead
+<h1 align="center">stallarr</h1>
+
+<p align="center"><b>Keeps your torrents seeding and hit-and-runs off your account.</b></p>
+
+**stallarr** watches your torrents for stalls, tracker errors and dead
 passkeys, then repairs them — so your ratio keeps moving instead of quietly
 dying at 3am.
 
@@ -9,7 +15,20 @@ runs the cheapest repair that could plausibly fix it, escalating only when that
 doesn't work. Tracker-specific knowledge lives in plugins, so teaching it a new
 site is one small file.
 
-Ships with **IPTorrents**, **OldToons World** and **DarkPeers**.
+Ships with **IPTorrents**, **OldToons World** and **DarkPeers**, and runs any
+other stock UNIT3D site with no code at all (see [Tracker credentials](#tracker-credentials)).
+
+**Where the code lives.** Development happens on
+[GitHub](https://github.com/ConniptionFit/stallarr) (issues and pull requests
+go there). A public copy is kept in sync on
+[Forgejo](https://git.pwrs.dev/powers/stallarr).
+
+**Contents:** [What it detects](#what-it-detects) ·
+[How it repairs](#how-it-repairs) · [Quick start](#quick-start) ·
+[The dashboard](#the-dashboard) · [Tracker credentials](#tracker-credentials) ·
+[Seeding obligations](#seeding-obligations) · [Ratio builder](#ratio-builder) ·
+[Signing in](#signing-in) · [Configuration](#configuration) ·
+[Notifications](#notifications) · [Development](#development) · [API](#api)
 
 ---
 
@@ -159,6 +178,35 @@ Open <http://localhost:8383>, then:
 There's no password by default. Set one under Settings → Web if it's exposed
 beyond your LAN.
 
+## The dashboard
+
+| Tab | What it's for |
+|---|---|
+| **Dashboard** | Library stats, open issues, the deletion queue, seeding obligations and 7-day trends. |
+| **Torrents** | Every torrent with its diagnosis. Search, filter, sort, bulk repair/reset/ignore, and a detail drawer per row. |
+| **History** | Every repair step taken, with the client's answer. |
+| **Deleted** | The permanent record of what auto-delete removed. |
+| **Trackers** | Per-site credentials, capabilities, account stats, and the Prowlarr import. |
+| **Seeding** | Torrents actively seeding, per tracker, with ratio, uploaded and seed time. |
+| **Discover** | The [ratio builder](#ratio-builder). |
+| **Settings** / **Logs** | Configuration, and the live log. |
+
+The stat tiles are grouped as *Upload & ratio*, *Health*, *Repairs*,
+*Hit-and-run protection*, *Housekeeping* and *System*. Every tile says what time
+frame it covers, and hovering one says exactly what it counts. A few
+distinctions are kept on purpose:
+
+- **Seeding** (complete and not stopped) is not **uploading** (sending data
+  right now). Idle seeds are healthy.
+- **Client ratio** covers the torrents in qBittorrent today. The tracker's
+  **account ratio**, which counts everything you ever transferred there, is on
+  the Trackers tab.
+- A repair step **accepted** by the client is not a torrent **recovered**.
+
+None of these numbers costs a tracker call. Views that do need the site
+(account stats, freeleech status) are cached for five minutes, so a dashboard
+left open does not poll your trackers every ten seconds.
+
 ## Tracker credentials
 
 ### Import them from Prowlarr
@@ -181,8 +229,12 @@ Two things Prowlarr can't give you, because it searches rather than seeds:
   `refresh announce` repair step is unavailable for that tracker; everything
   else works.
 
-Tick *keep credentials in sync* to re-import on every reload, so a key rotated
-in Prowlarr lands here without a second visit.
+Tick *sync automatically* to re-import on a schedule (**Sync every**, default
+60 minutes, never less than 15) as well as at startup and on every save. New
+trackers in Prowlarr then appear here on their own, and a key rotated there
+lands without a second visit. **Sync now** runs one immediately. A sync only
+ever touches API keys and URLs: passkeys and cookies you entered by hand are
+left alone.
 
 ### Or enter them by hand
 
@@ -447,12 +499,21 @@ can read it, and these messages name your torrents.
 ## Development
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest pytest-asyncio
-.venv/bin/python -m pytest -q
-DATA_DIR=./data PYTHONPATH=src .venv/bin/python -m stallarr
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt pytest pytest-asyncio ruff
+.venv/bin/python -m pytest -q          # offline: no tracker or client needed
+.venv/bin/ruff check src tests         # lint
+DATA_DIR=./data PYTHONPATH=src .venv/bin/python -m stallarr   # http://localhost:8383
 ```
 
-The test suite is offline — no tracker or client needed.
+Python 3.12+. Before changing behaviour, read [CLAUDE.md](CLAUDE.md): it is the
+design notes for the whole codebase (why diagnosis is two-phase, why deletion
+needs four guards, how secrets are redacted), written for humans and coding
+agents alike. [ADDING_A_TRACKER.md](ADDING_A_TRACKER.md) covers the most common
+change.
+
+Contributions go to [GitHub](https://github.com/ConniptionFit/stallarr) as pull
+requests; the [Forgejo copy](https://git.pwrs.dev/powers/stallarr) is updated
+from GitHub's `main`, so changes pushed there directly would be overwritten.
 
 ## API
 
@@ -492,3 +553,14 @@ stallarr_condemned_total, stallarr_deletions_total, stallarr_deleted_bytes_total
 stallarr_deletion_blocked{tracker=…}     present only while a breaker is tripped
 stallarr_disk_free_bytes
 ```
+
+## Credits
+
+The stallarr icon is a modified combination of the
+[Lucide](https://lucide.dev) `shield` and `activity` icons: a shield (protecting
+your account) whose heartbeat (torrent health) climbs into an upload arrow
+(ratio). Lucide is © Lucide Icons and Contributors under the ISC License; the
+full notice is in [assets/LICENSE-lucide](assets/LICENSE-lucide). Sources are in
+[`assets/`](assets/): `stallarr.svg` (app icon), `stallarr-mark.svg` (single
+colour, `currentColor`), `stallarr.png` (512 px avatar) and
+`social-preview.png` (1280×640 repository preview).

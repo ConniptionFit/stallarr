@@ -70,7 +70,7 @@ code { background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 5px; 
   gap: 16px; padding: 14px 20px; margin: 18px 20px 0;
 }
 .brand { display: flex; align-items: center; gap: 12px; }
-.logo { font-size: 26px; }
+.logo { width: 30px; height: 30px; flex: none; }
 .brand h1 { margin: 0; font-size: 19px; letter-spacing: -.3px; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
 
