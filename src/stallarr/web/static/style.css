@@ -89,7 +89,10 @@ main { padding: 16px 20px 48px; }
 
 .card { padding: 18px; margin-bottom: 18px; }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
-.card-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.card-head h2 { margin: 0; font-size: 15px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+/* The muted caption beside a card title is often a long sentence; let it wrap
+   under the title rather than push the card wider. */
+.card-head > .muted { min-width: 0; overflow-wrap: anywhere; }
 .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .card-foot { display: flex; align-items: center; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
 
@@ -118,6 +121,9 @@ label.inline { display: inline-flex; align-items: center; gap: 7px; }
 /* --- stats ------------------------------------------------------------- */
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
 .stat {
+  /* Grid items default to min-width:auto, so one long unbroken string (a URL in
+     a client error) widened the tile past its column. */
+  min-width: 0; overflow-wrap: anywhere;
   padding: 16px 18px; border-radius: var(--radius);
   background: var(--glass); border: 1px solid var(--glass-border);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
@@ -140,18 +146,23 @@ label.inline { display: inline-flex; align-items: center; gap: 7px; }
 .stat-section .stat-grid { margin-bottom: 0; }
 
 .card-row { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
-.card-row > .card { margin-bottom: 18px; }
+.card-row > .card { margin-bottom: 18px; min-width: 0; }
 
-.bar-row { display: grid; grid-template-columns: minmax(140px, 1.1fr) 2fr 44px; gap: 10px; align-items: center; margin: 7px 0; font-size: 13px; }
+.bar-row { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(60px, 2fr) 44px; gap: 10px; align-items: center; margin: 7px 0; font-size: 13px; }
+.bar-row > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar-row .track { display: block; height: 8px; border-radius: 4px; background: rgba(255,255,255,.06); overflow: hidden; }
 .bar-row .fill { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
 .bar-row .fill.warn { background: var(--warn); }
 .bar-row .fill.crit { background: var(--crit); }
 .bar-row .count { text-align: right; font-variant-numeric: tabular-nums; }
 
-.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 8px 0 0; font-size: 12px; }
+.kv { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; margin: 8px 0 0; font-size: 12px; }
 .kv dt { color: var(--muted); }
-.kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.kv dt, .kv dd { min-width: 0; }
+.kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Account cards hold a label/value list; at the general 160px minimum they
+   squeezed values to one character per line. */
+#tracker-stats .stat-grid { grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
 .kv .rule { grid-column: 1 / -1; border-top: 1px solid rgba(255,255,255,.07); margin: 4px 0; }
 
 .segmented { display: inline-flex; gap: 2px; }
@@ -166,10 +177,25 @@ th {
   border-bottom: 1px solid var(--glass-border); white-space: nowrap;
 }
 td { padding: 10px; border-bottom: 1px solid rgba(255,255,255,.045); vertical-align: top; }
+/* Long-text columns. Table cells ignore max-width, so a wide column is held in
+   check by giving it a floor (so names never collapse to one letter per line)
+   and letting the text break anywhere; the .table-wrap scrolls sideways when
+   the viewport is narrower than the floors add up to. */
+td.name { min-width: 15rem; overflow-wrap: anywhere; }
+td.text { min-width: 12rem; overflow-wrap: anywhere; }
+td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 tbody tr:hover { background: rgba(255,255,255,.03); }
-td.name { max-width: 380px; word-break: break-word; }
 td.actions { white-space: nowrap; }
 .empty { text-align: center; color: var(--muted); padding: 26px; }
+
+/* A long detail (an announce message, a client error) shown as at most two
+   lines; the full text is in the title. */
+.clamp {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.finding-line { margin-bottom: 4px; }
+.finding-line:last-child { margin-bottom: 0; }
 
 .group-row td {
   padding: 6px 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
@@ -186,7 +212,14 @@ td.actions { white-space: nowrap; }
 .pill {
   display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px;
   background: rgba(255,255,255,.08); border: 1px solid var(--glass-border); white-space: nowrap;
+  /* A pill never grows past its container: long names are cut with an
+     ellipsis, and the full text is in the pill's title. */
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle;
 }
+td .pill { max-width: 16rem; }
+/* Status pills carry sentences (an error from a tracker), which are the whole
+   point of the pill, so they wrap instead of being cut. */
+.pill.wrap { white-space: normal; overflow-wrap: anywhere; border-radius: 10px; text-align: left; }
 .pill.ok { background: rgba(63,185,80,.14); border-color: rgba(63,185,80,.35); color: #79d68a; }
 .pill.bad { background: rgba(226,76,75,.14); border-color: rgba(226,76,75,.35); color: #f08281; }
 .pill.warn { background: rgba(224,168,0,.14); border-color: rgba(224,168,0,.35); color: #e8bf4d; }
@@ -206,13 +239,14 @@ td.actions { white-space: nowrap; }
 .plugin-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
 .field { display: grid; gap: 5px; }
 .field label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
-.caps { display: flex; gap: 5px; flex-wrap: wrap; }
+.caps { display: flex; gap: 5px; flex-wrap: wrap; min-width: 0; flex: 1 1 260px; }
+.plugin-head > div:first-child { min-width: 0; overflow-wrap: anywhere; }
 
 /* Explanatory text under an input: why it is locked, or where a value comes
    from. Must read as secondary to the field itself. */
-.hint { font-size: 11px; line-height: 1.45; text-transform: none; letter-spacing: 0; }
+.hint { overflow-wrap: anywhere; font-size: 11px; line-height: 1.45; text-transform: none; letter-spacing: 0; }
 .hint code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 5px; font-size: 10.5px; }
-.note { font-size: 12px; line-height: 1.5; margin: 14px 0 0; }
+.note { overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; margin: 14px 0 0; }
 .note code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 5px; }
 
 /* An env-pinned setting is real config, just not editable here. Dim it rather
@@ -236,6 +270,7 @@ td.actions { white-space: nowrap; }
   margin: 0; max-height: 62vh; overflow: auto; font-size: 12px; line-height: 1.65;
   font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   background: rgba(0,0,0,.34); border-radius: 10px; padding: 14px; white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .log-INFO { color: #9fb3c8; }
 .log-DEBUG { color: #6b7a8d; }
@@ -245,7 +280,8 @@ td.actions { white-space: nowrap; }
 /* --- toast ------------------------------------------------------------- */
 .toast {
   position: fixed; right: 20px; bottom: 20px; z-index: 50;
-  padding: 12px 17px; border-radius: 11px; max-width: 380px;
+  padding: 12px 17px; border-radius: 11px; max-width: min(380px, calc(100vw - 40px));
+  overflow-wrap: anywhere;
   background: rgba(20,26,36,.94); border: 1px solid var(--glass-border);
   backdrop-filter: blur(12px); box-shadow: 0 10px 34px rgba(0,0,0,.45);
   animation: rise .18s ease-out;
@@ -260,14 +296,14 @@ td.actions { white-space: nowrap; }
 .danger-card { border-color: rgba(232,191,77,.45); }
 .danger-card h2::before { content: "⚠ "; }
 
-.warn-line { margin-top: 6px; font-size: 12px; color: #e8bf4d; }
+.warn-line { overflow-wrap: anywhere; margin-top: 6px; font-size: 12px; color: #e8bf4d; }
 
 /* --- trends ------------------------------------------------------------- */
 .trend-grid {
   display: grid; gap: 16px;
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
 }
-.trend { background: rgba(0,0,0,.2); border-radius: 11px; padding: 12px 14px; }
+.trend { min-width: 0; background: rgba(0,0,0,.2); border-radius: 11px; padding: 12px 14px; }
 .trend-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .trend-head .label { font-size: 12px; color: #9fb3c8; }
 .trend-head .value { font-size: 20px; font-weight: 600; margin-left: auto; }
@@ -283,7 +319,8 @@ td.actions { white-space: nowrap; }
 
 /* --- torrent filters, bulk actions, paging ------------------------------ */
 .torrent-filters { flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
-.torrent-filters input[type="search"] { min-width: 220px; flex: 1 1 220px; }
+.torrent-filters input[type="search"] { min-width: 0; flex: 1 1 220px; }
+.torrent-filters select { width: auto; flex: 0 1 auto; min-width: 0; max-width: 100%; }
 
 .bulk-bar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -310,8 +347,9 @@ td.name a:hover { border-bottom-color: currentColor; }
 .drawer-panel h3 { margin: 18px 0 8px; font-size: 13px; color: #9fb3c8; }
 .detail { display: grid; grid-template-columns: 130px 1fr; gap: 6px 12px; margin: 0; }
 .detail dt { color: #9fb3c8; font-size: 12px; }
-.detail dd { margin: 0; font-size: 13px; word-break: break-all; }
+.detail dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; min-width: 0; }
 .finding { margin-bottom: 8px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.finding > .muted { min-width: 0; overflow-wrap: anywhere; }
 @keyframes slide { from { transform: translateX(18px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 @media (max-width: 640px) {
@@ -322,5 +360,11 @@ td.name a:hover { border-bottom-color: currentColor; }
   .detail { grid-template-columns: 1fr; }
   .detail dt { margin-top: 6px; }
 }
-#tab-discover .torrent-filters select { width: auto; flex: 0 0 auto; }
-#discover-status, #discover-budget { margin: 6px 0; line-height: 1.8; }
+#discover-status, #discover-budget { margin: 6px 0; line-height: 1.8; overflow-wrap: anywhere; }
+#discover-status .pill { margin: 2px 0; }
+#prowlarr-last, #prowlarr-status { min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  #tracker-picker { min-width: 0; width: 100%; }
+  .stat-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+}

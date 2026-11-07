@@ -284,13 +284,13 @@ def build_router() -> APIRouter:
     ) -> dict:
         return {
             "history": await db.get_history(
-                limit=limit, infohash=infohash, action=action, ok=ok
+                limit=_clamp_limit(limit), infohash=infohash, action=action, ok=ok
             )
         }
 
     @router.get("/logs", dependencies=guarded)
     async def get_logs(limit: int = 200, level: str | None = None) -> dict:
-        return {"logs": recent_logs(limit=limit, level=level)}
+        return {"logs": recent_logs(limit=_clamp_limit(limit), level=level)}
 
     @router.get("/tracker-stats", dependencies=guarded)
     async def tracker_stats(request: Request) -> dict:
@@ -386,7 +386,7 @@ def build_router() -> APIRouter:
     @router.get("/deletions", dependencies=guarded)
     async def deletions(limit: int = 200) -> dict:
         return {
-            "deletions": await db.list_deletions(limit),
+            "deletions": await db.list_deletions(_clamp_limit(limit)),
             "totals": await db.deletion_totals(),
         }
 
@@ -545,6 +545,15 @@ def build_router() -> APIRouter:
         return result
 
     return router
+
+
+#: Upper bound on any list endpoint's `limit`. The dashboard asks for 200-300;
+#: an unbounded value is a full-table read serialised into one response.
+MAX_LIST_LIMIT = 1000
+
+
+def _clamp_limit(limit: int) -> int:
+    return min(max(limit, 1), MAX_LIST_LIMIT)
 
 
 def _sso_failure(detail: str) -> Response:
