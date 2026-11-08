@@ -28,10 +28,26 @@ src/stallarr/
   notify/__init__.py  Notifier: discord + telegram + ntfy, severity filter, dedupe
   integrations/       prowlarr.py: import tracker credentials
   discovery/          ratio builder: score.py (pure ranking), grab.py (guarded add)
+  stats.py            dashboard library totals, pure functions of the scan's data
+  utils.py            bencode/infohash, normalise_release, redact_secrets, formatting
   logging_setup.py    stdout + in-memory ring buffer the UI's log view reads
-  web/routes.py       API; static/ (app.js, index.html, style.css) is the dashboard
+  web/routes.py       API; static/ (app.js, index.html, style.css, icon.svg) is the dashboard
   web/oidc.py         OIDC code flow;  web/metrics.py  hand-rolled Prometheus gauges
+assets/               icon sources (stallarr.svg, stallarr-mark.svg), avatar and
+                      social-preview PNGs, LICENSE-lucide
 ```
+
+**Two remotes, one source of truth.** GitHub (`ConniptionFit/stallarr`) is where
+PRs land. Forgejo (`git.pwrs.dev/powers/stallarr`, public) is a copy pushed from
+GitHub `main` after merges; never commit there directly, it gets overwritten.
+README, CLAUDE.md and ADDING_A_TRACKER.md are the only documentation; the
+wikis on both hosts are left empty on purpose, so a docs change is a normal PR.
+
+**The icon is derived from Lucide** (`shield` + `activity`, ISC License). Keep
+`assets/LICENSE-lucide` and the attribution comments in the SVGs and in
+`index.html` when editing it. `web/static/icon.svg` is a copy of
+`assets/stallarr.svg` (the favicon); the header logo is the same mark inlined so
+it can take the theme's `--accent` and `--ok` colours.
 
 ## Design decisions worth knowing before you change things
 
