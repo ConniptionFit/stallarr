@@ -207,7 +207,7 @@ async def _delete(
     export_path = ""
     if cfg.delete_export_torrents:
         try:
-            export_path = await _export(client, diagnosis, cfg)
+            export_path = await export_torrent_file(client, diagnosis, cfg)
         except (ClientError, OSError) as exc:
             # Cancel this torrent's deletion rather than proceed unrecorded.
             # It stays condemned and will be retried next scan, so a permanent
@@ -249,13 +249,25 @@ async def _delete(
     )
 
 
-async def _export(client: TorrentClient, diagnosis: Diagnosis, cfg: RecoveryConfig) -> str:
+async def export_torrent_file(
+    client: TorrentClient,
+    diagnosis: Diagnosis,
+    cfg: RecoveryConfig,
+    *,
+    reason: str | None = None,
+    files_deleted: bool | None = None,
+) -> str:
     """Write the torrent's metainfo to the graveyard, returning where it went.
 
     Named by infohash rather than release name: names are not unique, not
     filesystem-safe, and not stable, and this file's whole job is to be findable
-    again from a history row.
+    again from a history row. `reason` and `files_deleted` default to this
+    module's own removal; `recovery/stalled.py` passes its own.
     """
+    if reason is None:
+        reason = diagnosis.primary.detail if diagnosis.primary else "unregistered"
+    if files_deleted is None:
+        files_deleted = cfg.delete_unregistered_files
     data = await client.export_torrent(diagnosis.torrent.infohash)
 
     directory = Path(cfg.delete_export_dir or "graveyard")
@@ -274,9 +286,9 @@ async def _export(client: TorrentClient, diagnosis: Diagnosis, cfg: RecoveryConf
                 "name": diagnosis.torrent.name,
                 "tracker": tracker_of(diagnosis),
                 "size": diagnosis.torrent.size,
-                "reason": diagnosis.primary.detail if diagnosis.primary else "unregistered",
+                "reason": reason,
                 "deleted_at": int(time.time()),
-                "files_deleted": cfg.delete_unregistered_files,
+                "files_deleted": files_deleted,
             },
             indent=2,
         ),

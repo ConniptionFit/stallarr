@@ -219,6 +219,15 @@ class ActionKind(StrEnum):
     #: ladder, `HANDLERS` and `AILMENT_ACTIONS`; it is here so grabs show up
     #: in history and the history filter like every other action.
     GRAB = "grab"
+    #: Have the Sonarr/Radarr that grabbed a dead download blocklist it and
+    #: search for another release (`recovery/stalled.py`). Off the ladder for
+    #: the same reason as REDOWNLOAD: it does not repair the torrent in front
+    #: of it, it replaces it, and it has its own switch.
+    REGRAB = "regrab"
+    #: Remove a dead download that owes nothing. Like DELETE it is absent from
+    #: the ladder, `HANDLERS` and `AILMENT_ACTIONS` and runs only behind its
+    #: own switch and guards — see `recovery/stalled.py`.
+    PURGE = "purge"
     ESCALATE = "escalate"
 
 

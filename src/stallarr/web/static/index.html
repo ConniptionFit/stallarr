@@ -94,6 +94,26 @@
         </p>
       </div>
 
+      <div class="glass card" id="dead-card" hidden>
+        <div class="card-head">
+          <h2>Downloads that will never finish</h2>
+          <span class="muted" id="dead-meta"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Torrent</th><th>Tracker</th><th>Done</th><th>Downloaded</th><th>No data for</th><th>Sonarr/Radarr</th><th>Status</th></tr>
+            </thead>
+            <tbody id="dead-body"></tbody>
+          </table>
+        </div>
+        <p class="muted note">
+          A download is dead after moving no data for the configured hours while its
+          tracker answers and reports no seeders. One is only removed when nothing is
+          owed on it; anything that could count towards a hit-and-run is kept.
+        </p>
+      </div>
+
       <div class="glass card" id="trend-card" hidden>
         <div class="card-head">
           <h2>Trend</h2>

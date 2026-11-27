@@ -3,10 +3,12 @@
 from .engine import RecoveryEngine, is_terminal
 from .reap import breaker_report, reap, tracker_of
 from .redownload import redownload
+from .stalled import handle_dead
 
 __all__ = [
     "RecoveryEngine",
     "breaker_report",
+    "handle_dead",
     "is_terminal",
     "reap",
     "redownload",

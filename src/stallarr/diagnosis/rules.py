@@ -169,10 +169,22 @@ def _check_announcing(torrent: Torrent, rules: RuleConfig, findings: list[Findin
         )
 
 
+def idle_for(torrent: Torrent, now: float) -> float:
+    """Seconds since this torrent last moved any data, in either direction.
+
+    A torrent that has never moved a byte has no activity stamp to measure
+    from, and reading that as "idle for 0 seconds" made the deadest possible
+    download — added, never connected to anyone — the one case that could
+    never be flagged as stalled. Its age is the honest stand-in.
+    """
+    last = max(torrent.last_activity, torrent.added_on)
+    return max(now - last, 0) if last else 0
+
+
 def _check_stalls(torrent: Torrent, rules: RuleConfig, now: float, findings: list[Finding]) -> None:
     if torrent.is_paused:
         return
-    idle_seconds = now - torrent.last_activity if torrent.last_activity else 0
+    idle_seconds = idle_for(torrent, now)
 
     if not torrent.is_complete:
         if torrent.dlspeed == 0 and idle_seconds > rules.stalled_download_minutes * 60:

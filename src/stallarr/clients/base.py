@@ -74,6 +74,15 @@ class TorrentClient(Protocol):
         """Bytes free where the client saves data, or None if it won't say."""
         return None
 
+    async def connection_status(self) -> str | None:
+        """"connected", "firewalled" or "disconnected", or None if unknown.
+
+        Asked before declaring any download dead: a VPN that has dropped makes
+        every download stall at once, and that must never read as a whole
+        queue of dead releases.
+        """
+        return None
+
     async def export_torrent(self, infohash: str) -> bytes:
         """The original .torrent metainfo, for keeping before a delete.
 

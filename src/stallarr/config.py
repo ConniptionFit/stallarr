@@ -97,6 +97,7 @@ class RecoveryConfig(BaseModel):
             "toggle": 60,
             "replace_torrent": 720,
             "redownload": 720,
+            "regrab": 60,
             "escalate": 1440,
         }
     )
@@ -170,6 +171,38 @@ class RecoveryConfig(BaseModel):
     #: Where those files go. Relative paths resolve inside the data directory.
     delete_export_dir: str = "graveyard"
 
+    # --- downloads that will never finish ---------------------------------------
+    # A download nobody is seeding stays "stalled" forever: no ladder step can
+    # conjure a seeder. What helps is a *different* release, which only the
+    # *arr that grabbed it can pick, and then getting the dead one out of the
+    # client — but only where removing it cannot cost a hit-and-run. See
+    # recovery/stalled.py for the rules.
+
+    #: How long a download must have moved no data at all before it counts as
+    #: dead rather than slow. Measured from the client's own last-activity
+    #: stamp, so it survives a stallarr restart.
+    stalled_dead_hours: int = 12
+    #: Tell Sonarr/Radarr to blocklist a dead release and search for another.
+    #: Needs at least one entry under `arr`. The *arr is always told to leave
+    #: the torrent in the client; removing it is the separate switch below.
+    stalled_regrab: bool = False
+    #: Remove dead downloads from the client when nothing is owed on them.
+    #: Off by default: a removal is not undoable, and "nothing owed" is a
+    #: judgement about each site's hit-and-run rules.
+    stalled_purge: bool = False
+    #: Delete the partial data too. It is an incomplete download of a release
+    #: being abandoned, so keeping it only fills the disk.
+    stalled_purge_files: bool = True
+    #: How much of a torrent may have been downloaded and still count as "owes
+    #: nothing", as a percent of its size. 0 means only torrents that received
+    #: no data at all. Raise it per tracker (`trackers.<id>.hnr_free_download_pct`)
+    #: to match a site's published hit-and-run buffer, not globally.
+    stalled_purge_max_downloaded_pct: float = 0.0
+    #: Ceiling on dead downloads acted on per scan (re-grabs and removals
+    #: together). A connection fault that defeats the other checks still costs
+    #: a handful rather than the whole queue.
+    stalled_max_per_scan: int = 5
+
 
 class TrackerConfig(BaseModel):
     """Per-tracker settings. `options` holds plugin-specific fields."""
@@ -199,7 +232,25 @@ class TrackerConfig(BaseModel):
     #: Warn when hit-and-run count reaches this. Most sites allow a couple
     #: before acting, so the useful alarm is "approaching", not "any at all".
     max_hit_and_runs: int = 0
+    #: Let stallarr remove dead downloads from this tracker when nothing is
+    #: owed on them. A per-site veto on top of `recovery.stalled_purge`, for a
+    #: site whose rules you would rather not reason about.
+    purge_stalled: bool = True
+    #: How much of a torrent this site lets you download before a hit-and-run
+    #: can count, as a percent of its size. Blank uses
+    #: `recovery.stalled_purge_max_downloaded_pct`. Take it from the site's own
+    #: rules page; many UNIT3D sites publish a small buffer.
+    hnr_free_download_pct: float | None = None
     options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("hnr_free_download_pct", mode="before")
+    @classmethod
+    def _blank_is_inherit(cls, value: Any) -> Any:
+        # Blank means "use the global figure", and must not read as 0: a
+        # tracker-level 0 is a real, stricter setting.
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value
 
     @field_validator("min_ratio", "max_hit_and_runs", mode="before")
     @classmethod
@@ -226,6 +277,20 @@ class TrackerConfig(BaseModel):
     hosts: list[str] = Field(default_factory=list)
     #: Set by the Prowlarr import so a re-sync knows what it may overwrite.
     source: str = ""
+
+
+class ArrConfig(BaseModel):
+    """One Sonarr, Radarr, Lidarr or Readarr instance.
+
+    Used only to hand a dead download back for a re-grab. Keyed in
+    `Config.arr` by any name; `kind` may be left blank when the name starts
+    with the app type (`sonarr`, `sonarr4k`, `radarr-anime`).
+    """
+
+    enabled: bool = True
+    kind: str = ""
+    url: str = ""
+    api_key: str = ""
 
 
 class ProwlarrConfig(BaseModel):
@@ -401,6 +466,8 @@ class Config(BaseModel):
     web: WebConfig = Field(default_factory=WebConfig)
     prowlarr: ProwlarrConfig = Field(default_factory=ProwlarrConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
+    #: Sonarr/Radarr instances, keyed by a name of your choosing.
+    arr: dict[str, ArrConfig] = Field(default_factory=dict)
     #: Keyed by tracker plugin id, e.g. "iptorrents", "darkpeers".
     trackers: dict[str, TrackerConfig] = Field(default_factory=dict)
 
@@ -433,6 +500,10 @@ _ENV_MAP = {
     "PROWLARR_ENABLED": "prowlarr.enabled",
     "PROWLARR_AUTO_SYNC": "prowlarr.auto_sync",
     "PROWLARR_SYNC_INTERVAL_MINUTES": "prowlarr.sync_interval_minutes",
+    "SONARR_URL": "arr.sonarr.url",
+    "SONARR_API_KEY": "arr.sonarr.api_key",
+    "RADARR_URL": "arr.radarr.url",
+    "RADARR_API_KEY": "arr.radarr.api_key",
 }
 
 #: Tracker fields settable per tracker as STALLARR_TRACKER_<ID>_<FIELD>.

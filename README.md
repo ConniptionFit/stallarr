@@ -40,7 +40,7 @@ go there). A public copy is kept in sync on
 | `tracker_auth` | Bad or rotated passkey. |
 | `tracker_down` | Every tracker on the torrent is failing. |
 | `not_announcing` | Active for ages but no tracker was ever contacted. |
-| `stalled_download` | No data for N minutes at partial progress. |
+| `stalled_download` | No data for N minutes at partial progress (measured from when it was added, if it never moved a byte). |
 | `stalled_upload` | The tracker reports leechers, but we have no peers. |
 | `missing_files` | Data has gone missing on disk. |
 | `client_error` | qBittorrent has thrown the torrent into an error state. |
@@ -141,6 +141,55 @@ nothing to delete.
 The **Deleted** tab is the permanent record — what went, when, how big it was,
 whether the data went with it, the tracker's own reason, and which kept file
 corresponds. Unlike History, it is never trimmed by the retention setting.
+
+### Downloads that will never finish
+
+Sonarr's *"The download is stalled with no connections"* usually means nobody
+is seeding that release, and no repair step can conjure a seeder. Two switches
+under Settings → *Downloads that never finish* handle it. Both are off by
+default.
+
+A download counts as **dead** after moving no data at all for **Dead after no
+data for (hours)** (default 12). Before anything happens to it, the evidence has
+to say the *release* is dead, not your connection:
+
+- **qBittorrent has a connection.** A dropped VPN stalls every download at once,
+  and stallarr holds all of them rather than call a whole queue dead.
+- **A tracker answers and reports no seeders.** A tracker that's down can't say
+  whether the swarm is empty, and one reporting seeders you can't reach points
+  at your port or connection, which a different release would hit too.
+
+**Ask Sonarr/Radarr to blocklist it and grab another release** tells the app
+that grabbed it to do exactly what its own *Remove from queue → Blocklist*
+button does: mark the release failed and search for another. Add Sonarr and
+Radarr under the same settings group (or `STALLARR_SONARR_URL` /
+`_API_KEY`, `STALLARR_RADARR_URL` / `_API_KEY`). stallarr always tells the app
+to *leave the torrent in the client*, so the removal below stays behind
+stallarr's own guards.
+
+**Remove dead downloads that owe nothing** takes it out of qBittorrent, with its
+partial data unless you untick **…and their partial data**. The priority is
+never creating a hit-and-run, so a dead download is **kept** when any of these
+hold:
+
+- the tracker lists it as owed or flags it as a hit-and-run;
+- more of it was downloaded than that site allows before a hit-and-run can
+  count. The global default is **0%**, so only downloads that received nothing
+  qualify. Set each tracker's **Hit-and-run buffer (%)** on the Trackers tab from
+  its rules page to loosen that per site;
+- the tracker's **Allow removing dead downloads** is unticked, or the torrent is
+  tagged `stallarr-keep`.
+
+A kept download still gets its replacement grabbed, and stays in the client in
+case the swarm returns. When Sonarr/Radarr tracks a download, the removal waits
+until the app has blocklisted it, and it waits too if any app didn't answer that
+scan, so an app is never left waiting on a download that's gone. Removals are
+capped per scan, respect dry run, keep the `.torrent` in the graveyard first,
+and appear in the **Deleted** tab.
+
+The dashboard's **Downloads that will never finish** card lists every dead
+download and what happened: re-grabbed, removed, or held and kept with the
+reason.
 
 The steps themselves: **resume**, **reannounce**, **refresh announce** (rewrite
 a stale passkey, keeping the announce domain the torrent already uses),
@@ -435,6 +484,10 @@ environment:
   STALLARR_WEB_PASSWORD: changeme
   STALLARR_PROWLARR_URL: http://prowlarr:9696
   STALLARR_PROWLARR_API_KEY: ...
+  STALLARR_SONARR_URL: http://sonarr:8989
+  STALLARR_SONARR_API_KEY: ...
+  STALLARR_RADARR_URL: http://radarr:7878
+  STALLARR_RADARR_API_KEY: ...
   STALLARR_TRACKER_DARKPEERS_API_KEY: ...
   STALLARR_TRACKER_IPTORRENTS_PASSKEY: ...
 ```

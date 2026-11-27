@@ -105,6 +105,8 @@ const FRIENDLY = {
   replace_torrent: 'Replace .torrent',
   redownload: 'Re-download',
   delete: 'Delete',
+  regrab: 'Re-grab via Sonarr/Radarr',
+  purge: 'Remove dead download',
 };
 
 const label = (text) => FRIENDLY[text]
@@ -246,6 +248,7 @@ async function refreshOnce() {
       renderSeedingUnmatched(status.seeding_unmatched || []);
       renderBreakers(status.deletion_blocks || []);
       renderCondemned(status.condemned || []);
+      renderDeadDownloads(status.dead_downloads || []);
       await loadTrend();
     }
     if (state.activeTab === 'torrents') await loadTorrents();
@@ -352,6 +355,29 @@ function renderCondemned(rows) {
     } catch (err) { toast(err.message, 'bad'); }
     refresh();
   }));
+}
+
+/** Downloads that will never finish, with what was done or why nothing was.
+ *
+ *  "Held" and "kept" rows are the point of this card: a dead download left in
+ *  place because removing it could cost a hit-and-run must be visible, or it
+ *  reads as stallarr not noticing.
+ */
+function renderDeadDownloads(rows) {
+  $('#dead-card').hidden = !rows.length;
+  if (!rows.length) return;
+
+  $('#dead-meta').textContent = `${rows.length} download(s)`;
+  $('#dead-body').innerHTML = rows.map((r) => `
+    <tr>
+      <td class="name">${esc(r.name)}</td>
+      <td>${pill(r.tracker_name || r.tracker)}</td>
+      <td class="num">${pct(r.progress)}</td>
+      <td class="num">${bytes(r.downloaded)}</td>
+      <td class="muted num">${r.idle_hours}h</td>
+      <td class="muted">${r.managed_by ? esc(r.managed_by) : '—'}</td>
+      <td class="muted text">${clamp(r.status)}</td>
+    </tr>`).join('');
 }
 
 /** Small inline sparklines. No chart library: these are polylines over a fixed
@@ -1323,6 +1349,11 @@ const TRACKER_FIELDS = [
     hint: 'The site’s own requirement, not a global one. 0 disables the check.' },
   { name: 'max_hit_and_runs', label: 'Warn at hit-and-runs', kind: 'number', always: true,
     hint: 'Most sites tolerate a couple, so the useful alarm is "approaching", not "any". 0 disables.' },
+  { name: 'purge_stalled', label: 'Allow removing dead downloads', kind: 'checkbox', always: true, default: true,
+    hint: 'Only matters with "Remove dead downloads" on in Settings. Untick to never remove a dead download from this site.' },
+  { name: 'hnr_free_download_pct', label: 'Hit-and-run buffer (%)', kind: 'optnumber', always: true,
+    placeholder: 'global default',
+    hint: 'How much of a torrent this site lets you download before a hit-and-run can count, from its rules page. A dead download that took more than this is kept, never removed. Blank uses the global setting.' },
 ];
 
 /** Fields to render for one plugin, per its declared credential_fields. */
@@ -1392,9 +1423,21 @@ function renderTrackerDetail(trackerStatus = {}) {
     // string. That value is already on screen; echoing it leaks nothing.
     const pending = field.secret && typeof draft[field.name] === 'string'
       && draft[field.name] !== '' && draft[field.name] !== SENTINEL;
+    if (field.kind === 'checkbox') {
+      const on = value ?? field.default;
+      return `
+      <div class="field">
+        <label>&nbsp;</label>
+        <label class="inline" title="${esc(field.hint || '')}">
+          <input type="checkbox" data-field="${field.name}" data-kind="checkbox" ${on ? 'checked' : ''}> ${esc(field.label)}
+        </label>
+        ${field.hint ? `<span class="muted hint">${esc(field.hint)}</span>` : ''}
+      </div>`;
+    }
     const shown = field.secret
       ? (pending ? draft[field.name] : '')
-      : field.kind === 'list' ? (value || []).join(', ') : (value || '');
+      : field.kind === 'list' ? (value || []).join(', ')
+        : field.kind === 'optnumber' ? (value ?? '') : (value || '');
     const placeholder = field.secret
       ? (isSet ? 'saved — leave blank to keep' : 'not set')
       : (field.placeholder || (field.name === 'url' ? plugin.default_url : '') || '');
@@ -1438,6 +1481,14 @@ function renderTrackerDetail(trackerStatus = {}) {
 /** A form box's value in the shape the config stores, for comparison. */
 function trackerFieldValue(field, raw) {
   if (field.kind === 'list') return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (field.kind === 'optnumber') {
+    // Blank means "inherit the global setting", which is null, not 0: a
+    // tracker-level 0 is a real and stricter value.
+    const text = raw.trim();
+    if (text === '') return null;
+    const num = Number(text);
+    return Number.isFinite(num) ? num : text;
+  }
   if (field.kind === 'number') {
     // Blank means "off", which the config stores as 0. Anything unparseable is
     // passed through as typed so the server can say what is wrong with it.
@@ -1480,8 +1531,13 @@ function captureTrackerDraft() {
       if (el.value !== '') draft[field.name] = el.value;
       return;
     }
+    if (field.kind === 'checkbox') {
+      if (el.checked !== (saved[field.name] ?? field.default)) draft[field.name] = el.checked;
+      return;
+    }
     const value = trackerFieldValue(field, el.value);
     const current = field.kind === 'list' ? (saved[field.name] || [])
+      : field.kind === 'optnumber' ? (saved[field.name] ?? null)
       : field.kind === 'number' ? (saved[field.name] ?? 0)
       : (saved[field.name] ?? '');
     if (!sameValue(value, current)) draft[field.name] = value;
@@ -1796,6 +1852,18 @@ const SETTINGS_SCHEMA = [
   { path: 'recovery.delete_max_tracker_fraction', label: 'Abort if this fraction of a tracker is unregistered', type: 'number' },
   { path: 'recovery.delete_export_torrents', label: 'Keep the .torrent file before deleting', type: 'checkbox' },
   { path: 'recovery.delete_export_dir', label: 'Keep them in' },
+
+  { group: 'Downloads that never finish' },
+  { path: 'recovery.stalled_dead_hours', label: 'Dead after no data for (hours)', type: 'number' },
+  { path: 'recovery.stalled_regrab', label: 'Ask Sonarr/Radarr to blocklist it and grab another release', type: 'checkbox' },
+  { path: 'recovery.stalled_purge', label: 'Remove dead downloads that owe nothing', type: 'checkbox' },
+  { path: 'recovery.stalled_purge_files', label: '…and their partial data', type: 'checkbox' },
+  { path: 'recovery.stalled_purge_max_downloaded_pct', label: 'Owes nothing if downloaded ≤ (% of size; trackers can override)', type: 'number' },
+  { path: 'recovery.stalled_max_per_scan', label: 'Max dead downloads handled per scan', type: 'number' },
+  { path: 'arr.sonarr.url', label: 'Sonarr URL' },
+  { path: 'arr.sonarr.api_key', label: 'Sonarr API key', type: 'password' },
+  { path: 'arr.radarr.url', label: 'Radarr URL' },
+  { path: 'arr.radarr.api_key', label: 'Radarr API key', type: 'password' },
 
   { group: 'Ratio builder' },
   { path: 'discovery.enabled', label: 'Find torrents worth seeding long-term', type: 'checkbox' },
