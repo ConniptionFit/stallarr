@@ -365,6 +365,14 @@ class QbittorrentClient:
             return None
         return int(value) if isinstance(value, (int, float)) else None
 
+    async def connection_status(self) -> str | None:
+        resp = await self._get("/transfer/info")
+        try:
+            value = resp.json().get("connection_status")
+        except ValueError:
+            return None
+        return str(value) if value else None
+
     async def export_torrent(self, infohash: str) -> bytes:
         resp = await self._get("/torrents/export", params={"hash": infohash})
         data = resp.content

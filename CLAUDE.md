@@ -24,9 +24,10 @@ src/stallarr/
   trackers/           plugin registry; base.py -> unit3d.py -> per-site files
   diagnosis/rules.py  client state -> list of ailments
   recovery/           actions.py (the steps), engine.py (which step, when),
-                      reap.py (guarded deletion), redownload.py (unmatched H&R debts)
+                      reap.py (guarded deletion), redownload.py (unmatched H&R debts),
+                      stalled.py (dead downloads: re-grab, guarded purge)
   notify/__init__.py  Notifier: discord + telegram + ntfy, severity filter, dedupe
-  integrations/       prowlarr.py: import tracker credentials
+  integrations/       prowlarr.py: import tracker credentials; arr.py: Sonarr/Radarr re-grab
   discovery/          ratio builder: score.py (pure ranking), grab.py (guarded add)
   stats.py            dashboard library totals, pure functions of the scan's data
   utils.py            bencode/infohash, normalise_release, redact_secrets, formatting
@@ -175,6 +176,31 @@ multi-tracker torrent is not grounds to erase it. `ActionKind.DELETE` is absent
 from `DEFAULT_LADDER`, `HANDLERS` and `AILMENT_ACTIONS` — every ladder step
 tries to keep a torrent, and letting the engine select this one off a list would
 make destruction just another rung.
+
+**A dead download is replaced by the *arr, and removed only when it owes
+nothing.** `recovery/stalled.py` handles downloads that moved no data for
+`stalled_dead_hours`. Re-grab (`integrations/arr.py`) asks the Sonarr/Radarr
+whose queue holds the infohash to blocklist and re-search, via the bulk queue
+endpoint with every row for that torrent (a season pack is one row per
+episode) and `removeFromClient=false` *always*: letting the app delete it would
+skip every guard below. `ActionKind.REGRAB` and `PURGE` are off the ladder like
+`DELETE`, each behind its own switch.
+
+Nothing happens unless the evidence says the release is dead rather than the
+connection: the client is not `disconnected` (a dropped VPN stalls the whole
+queue with Sonarr's exact message), and a tracker is working and reports no
+seeders. A purge additionally needs `keep_reason` to find nothing owed: no
+hit-and-run finding, no `stallarr-keep` tag, the tracker's `purge_stalled`
+on, and `downloaded` within the site's `hnr_free_download_pct` (blank inherits
+the global, which defaults to 0 — only untouched downloads). That per-tracker
+`None` vs `0` distinction is load-bearing; the UI's `optnumber` field kind
+exists to keep it. When an app tracks the torrent, the purge waits for its
+blocklist to succeed (`regrabbed` in the attempts table), and any app that
+did not answer holds purges of unmatched torrents. Purges are written to the
+`deletions` ledger with the partial size actually on disk.
+
+`rules.idle_for` falls back to `added_on` when `last_activity` is 0: a torrent
+that never moved a byte used to read as idle for 0s, hiding the deadest case.
 
 **Adding a recovery step needs a ladder migration.** `recovery.ladder` is a
 saved permission list, so a new step is absent from every existing config and

@@ -19,6 +19,7 @@ from .clients import ClientError, TorrentClient, build_client
 from .config import Config
 from .diagnosis import diagnose_local, enrich, should_skip
 from .discovery import Discovery
+from .integrations.arr import ArrRouter
 from .models import (
     ActionResult,
     Ailment,
@@ -30,7 +31,7 @@ from .models import (
     TrackerFreeleechEntry,
 )
 from .notify import Notifier
-from .recovery import RecoveryEngine, breaker_report, reap, redownload, tracker_of
+from .recovery import RecoveryEngine, breaker_report, handle_dead, reap, redownload, tracker_of
 from .recovery.redownload import attempt_key as redownload_key
 from .stats import download_headroom, library_stats, problems_by_ailment
 from .trackers import TrackerRouter, load_plugins
@@ -86,6 +87,8 @@ class StallarrService:
         self.client: TorrentClient | None = None
         self.router = TrackerRouter({})
         self.engine: RecoveryEngine | None = None
+        #: Sonarr/Radarr instances, for handing dead downloads back.
+        self.arrs = ArrRouter({})
         self.notifier = Notifier(cfg.notify, cfg.web.base_url)
 
         self.last_scan = ScanSummary()
@@ -101,6 +104,8 @@ class StallarrService:
         #: evidence. Held so the UI can explain a breaker that has quietly
         #: stopped the feature working.
         self.deletion_blocks: list[dict[str, Any]] = []
+        #: Downloads that look dead, with what was done or why nothing was.
+        self.dead_downloads: list[dict[str, Any]] = []
         #: Free space reported by the client, refreshed each scan.
         self.disk: dict[str, Any] = {}
         #: Whole-library totals from the last scan's torrent list. Computed
@@ -160,6 +165,7 @@ class StallarrService:
             except Exception:
                 log.debug("error closing client", exc_info=True)
         await self.router.close()
+        await self.arrs.close()
 
     async def _build(self) -> None:
         """(Re)create the client, plugins and engine from current config."""
@@ -167,6 +173,7 @@ class StallarrService:
 
         self.client = build_client(self.cfg)
         self.router = TrackerRouter(load_plugins(self.cfg))
+        self.arrs = ArrRouter(self.cfg.arr)
         self.engine = RecoveryEngine(self.client, self.router, self.cfg.recovery)
 
         try:
@@ -465,6 +472,11 @@ class StallarrService:
         # and escalating it first would tag and alert on something about to go.
         deleted = await self._reap(diagnoses, tracker_totals, summary)
         diagnoses = [d for d in diagnoses if d.torrent.infohash not in deleted]
+
+        # Also before repairs, for the same reason: a dead download removed here
+        # has nothing left for the ladder to work on.
+        purged = await self._handle_dead(diagnoses, summary)
+        diagnoses = [d for d in diagnoses if d.torrent.infohash not in purged]
 
         # Repair worst-first so a burst of problems fixes the critical ones even
         # if the client starts rate-limiting us partway through.
@@ -778,6 +790,42 @@ class StallarrService:
             )
         return gone
 
+    async def _handle_dead(self, diagnoses: list[Diagnosis], summary: ScanSummary) -> set[str]:
+        """Re-grab and, where nothing is owed, remove downloads that will never
+        finish. Returns what was removed. Contained like `_reap`: a failure here
+        must not cost the scan its repairs.
+        """
+        if self.client is None or self.engine is None:
+            return set()
+        try:
+            outcome = await handle_dead(
+                self.client, self.arrs, diagnoses, self.cfg.recovery, self.cfg.trackers
+            )
+        except Exception:
+            log.exception("handling dead downloads failed")
+            return set()
+
+        for row in outcome.report:
+            plugin = self.router.get(row["tracker"])
+            row["tracker_name"] = (plugin.name if plugin else "") or row["tracker"]
+        self.dead_downloads = outcome.report
+
+        for diagnosis, result in outcome.results:
+            summary.actions += 1
+            if not result.ok:
+                summary.errors.append(f"{diagnosis.torrent.name[:40]}: {result.message}")
+            await self.engine.log_action(
+                infohash=diagnosis.torrent.infohash,
+                name=diagnosis.torrent.name,
+                tracker=diagnosis.tracker_id or "",
+                ailment=str(Ailment.STALLED_DOWNLOAD),
+                result=result,
+            )
+            await self.notifier.alert(diagnosis, result)
+        if outcome.purged:
+            log.warning("removed %d dead download(s) that owed nothing", len(outcome.purged))
+        return outcome.purged
+
     async def _record_snapshot(self, summary: ScanSummary) -> None:
         """One row per finished scan, so the dashboard can show drift.
 
@@ -902,6 +950,8 @@ class StallarrService:
             "seeding_unmatched": self.seeding_unmatched,
             # Trackers where deletion is currently refused, and on what evidence.
             "deletion_blocks": self.deletion_blocks,
+            # Downloads that will never finish, and what was or was not done.
+            "dead_downloads": self.dead_downloads,
             "disk": self.disk,
             "prowlarr": {
                 "auto_sync": self.cfg.prowlarr.enabled and self.cfg.prowlarr.auto_sync,
